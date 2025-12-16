@@ -11,6 +11,7 @@ Environment Variables:
     PHONE_AGENT_API_KEY: API key for model authentication (default: EMPTY)
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_WDA_URL: WebDriverAgent URL (default: http://localhost:8100)
+    PHONE_AGENT_WDA_INSECURE: Disable TLS verification for WDA HTTPS URL (optional)
     PHONE_AGENT_DEVICE_ID: iOS device UDID for multi-device setups
     PHONE_AGENT_IOS_SCALE_FACTOR: Override iOS coordinate scale factor (optional)
 """
@@ -28,7 +29,14 @@ from phone_agent.model import ModelConfig
 from phone_agent.xctest import XCTestConnection, list_devices
 
 
-def check_system_requirements(wda_url: str = "http://localhost:8100") -> bool:
+def _env_truthy(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def check_system_requirements(
+    wda_url: str = "http://localhost:8100", *, verify_tls: bool = True
+) -> bool:
     """
     Check system requirements before running the agent.
 
@@ -117,7 +125,7 @@ def check_system_requirements(wda_url: str = "http://localhost:8100") -> bool:
     # Check 3: WebDriverAgent running
     print(f"3. Checking WebDriverAgent ({wda_url})...", end=" ")
     try:
-        conn = XCTestConnection(wda_url=wda_url)
+        conn = XCTestConnection(wda_url=wda_url, verify_tls=verify_tls)
 
         if conn.is_wda_ready():
             print("✅ OK")
@@ -239,6 +247,13 @@ Examples:
         help="WebDriverAgent URL (default: http://localhost:8100)",
     )
 
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        default=_env_truthy("PHONE_AGENT_WDA_INSECURE"),
+        help="Disable TLS verification for WDA HTTPS URL",
+    )
+
     scale_factor_env = os.getenv("PHONE_AGENT_IOS_SCALE_FACTOR")
     parser.add_argument(
         "--scale-factor",
@@ -297,7 +312,7 @@ def handle_device_commands(args) -> bool:
     Returns:
         True if a device command was handled (should exit), False otherwise.
     """
-    conn = XCTestConnection(wda_url=args.wda_url)
+    conn = XCTestConnection(wda_url=args.wda_url, verify_tls=not args.insecure)
 
     # Handle --list-devices
     if args.list_devices:
@@ -387,7 +402,7 @@ def main():
         return
 
     # Run system requirements check before proceeding
-    if not check_system_requirements(wda_url=args.wda_url):
+    if not check_system_requirements(wda_url=args.wda_url, verify_tls=not args.insecure):
         sys.exit(1)
 
     # Check model API connectivity and model availability
@@ -406,6 +421,7 @@ def main():
         wda_url=args.wda_url,
         device_id=args.device_id,
         scale_factor=args.scale_factor,
+        verify_tls=not args.insecure,
         verbose=not args.quiet,
         lang=args.lang,
     )

@@ -36,12 +36,15 @@ class IOSActionHandler(BaseActionHandler):
         wda_url: str = "http://localhost:8100",
         session_id: str | None = None,
         scale_factor: float | None = None,
+        verify_tls: bool = True,
         confirmation_callback: Callable[[str], bool] | None = None,
         takeover_callback: Callable[[str], None] | None = None,
     ):
         self.wda_url = wda_url
         self.session_id = session_id
-        self._wda_client = WDAClient(self.wda_url, session_id=self.session_id)
+        self._wda_client = WDAClient(
+            self.wda_url, session_id=self.session_id, verify_tls=verify_tls
+        )
         self._scale_factor = scale_factor if (scale_factor and scale_factor > 0) else None
         super().__init__(
             confirmation_callback=confirmation_callback, takeover_callback=takeover_callback

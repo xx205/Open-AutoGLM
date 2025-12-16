@@ -18,6 +18,7 @@ class IOSAgentConfig(BaseAgentConfig):
     session_id: str | None = None
     device_id: str | None = None  # iOS device UDID
     scale_factor: float | None = None
+    verify_tls: bool = True
 
 
 class IOSPhoneAgent(BasePhoneAgent):
@@ -54,7 +55,9 @@ class IOSPhoneAgent(BasePhoneAgent):
         resolved_agent_config = agent_config or IOSAgentConfig()
 
         # Initialize WDA connection and create session if needed
-        self.wda_connection = XCTestConnection(wda_url=resolved_agent_config.wda_url)
+        self.wda_connection = XCTestConnection(
+            wda_url=resolved_agent_config.wda_url, verify_tls=resolved_agent_config.verify_tls
+        )
 
         # Auto-create session if not provided
         if resolved_agent_config.session_id is None:
@@ -70,12 +73,15 @@ class IOSPhoneAgent(BasePhoneAgent):
             wda_url=resolved_agent_config.wda_url,
             session_id=resolved_agent_config.session_id,
             scale_factor=resolved_agent_config.scale_factor,
+            verify_tls=resolved_agent_config.verify_tls,
             confirmation_callback=confirmation_callback,
             takeover_callback=takeover_callback,
         )
 
         wda_client = WDAClient(
-            resolved_agent_config.wda_url, session_id=resolved_agent_config.session_id
+            resolved_agent_config.wda_url,
+            session_id=resolved_agent_config.session_id,
+            verify_tls=resolved_agent_config.verify_tls,
         )
 
         super().__init__(

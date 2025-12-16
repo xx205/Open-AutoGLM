@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from phone_agent.actions.base_handler import BaseActionHandler
 from phone_agent.actions.types import ActionResult
+from phone_agent.config.timing import TIMING_CONFIG
 from phone_agent.xctest import (
     back,
     double_tap,
@@ -111,13 +112,13 @@ class IOSActionHandler(BaseActionHandler):
 
     def _type_text(self, text: str) -> None:
         clear_text(wda_url=self.wda_url, session_id=self.session_id, client=self._wda_client)
-        time.sleep(0.5)
+        time.sleep(TIMING_CONFIG.action.text_clear_delay)
 
         type_text(text, wda_url=self.wda_url, session_id=self.session_id, client=self._wda_client)
-        time.sleep(0.5)
+        time.sleep(TIMING_CONFIG.action.text_input_delay)
 
         hide_keyboard(wda_url=self.wda_url, session_id=self.session_id, client=self._wda_client)
-        time.sleep(0.5)
+        time.sleep(TIMING_CONFIG.action.keyboard_restore_delay)
 
     def _swipe(self, start_x: int, start_y: int, end_x: int, end_y: int) -> None:
         start_x_pt, start_y_pt = self._to_points(start_x, start_y)

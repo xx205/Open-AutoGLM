@@ -3,6 +3,7 @@
 import time
 
 from phone_agent.config.apps_ios import APP_PACKAGES_IOS as APP_PACKAGES
+from phone_agent.config.timing import TIMING_CONFIG
 from phone_agent.xctest.wda_client import WDAClient, WDAError
 
 DEFAULT_SCREEN_SIZE = (375, 812)  # iPhone points (iPhone X and later)
@@ -52,7 +53,7 @@ def tap(
     y: int,
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> None:
     """
@@ -65,6 +66,8 @@ def tap(
         session_id: Optional WDA session ID.
         delay: Delay in seconds after tap.
     """
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_tap_delay
     try:
         wda = _get_client(wda_url, session_id, client)
         actions = {
@@ -93,7 +96,7 @@ def double_tap(
     y: int,
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> None:
     """
@@ -106,6 +109,8 @@ def double_tap(
         session_id: Optional WDA session ID.
         delay: Delay in seconds after double tap.
     """
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_double_tap_delay
     try:
         wda = _get_client(wda_url, session_id, client)
         actions = {
@@ -139,7 +144,7 @@ def long_press(
     duration: float = 3.0,
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> None:
     """
@@ -153,6 +158,8 @@ def long_press(
         session_id: Optional WDA session ID.
         delay: Delay in seconds after long press.
     """
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_long_press_delay
     try:
         wda = _get_client(wda_url, session_id, client)
         duration_ms = int(duration * 1000)
@@ -185,7 +192,7 @@ def swipe(
     duration: float | None = None,
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> None:
     """
@@ -201,6 +208,8 @@ def swipe(
         session_id: Optional WDA session ID.
         delay: Delay in seconds after swipe.
     """
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_swipe_delay
     try:
         wda = _get_client(wda_url, session_id, client)
         if duration is None:
@@ -228,7 +237,7 @@ def swipe(
 def back(
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> None:
     """
@@ -243,6 +252,8 @@ def back(
         iOS doesn't have a universal back button. This simulates a back gesture
         by swiping from the left edge of the screen.
     """
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_back_delay
     try:
         wda = _get_client(wda_url, session_id, client)
         screen_w, screen_h = get_screen_size(wda_url=wda_url, session_id=session_id, client=wda)
@@ -259,7 +270,7 @@ def back(
 def home(
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> None:
     """
@@ -270,6 +281,8 @@ def home(
         session_id: Optional WDA session ID.
         delay: Delay in seconds after pressing home.
     """
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_home_delay
     try:
         wda = _get_client(wda_url, session_id, client)
         wda.post("wda/homescreen", use_session=False, timeout=10.0, allow_status=(200, 201, 204))
@@ -282,7 +295,7 @@ def launch_app(
     app_name: str,
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> bool:
     """
@@ -299,6 +312,8 @@ def launch_app(
     """
     if app_name not in APP_PACKAGES:
         return False
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_launch_delay
 
     try:
         wda = _get_client(wda_url, session_id, client)
@@ -350,7 +365,7 @@ def press_button(
     button_name: str,
     wda_url: str = "http://localhost:8100",
     session_id: str | None = None,
-    delay: float = 1.0,
+    delay: float | None = None,
     client: WDAClient | None = None,
 ) -> None:
     """
@@ -362,6 +377,8 @@ def press_button(
         session_id: Optional WDA session ID.
         delay: Delay in seconds after pressing.
     """
+    if delay is None:
+        delay = TIMING_CONFIG.device.default_home_delay
     try:
         wda = _get_client(wda_url, session_id, client)
         wda.post(

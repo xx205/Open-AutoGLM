@@ -144,7 +144,7 @@ python ios.py --wda-url http://<iphone-ip>:8100 --base-url http://localhost:8000
 
 - `--insecure`：当 WDA 使用 https 且证书无法校验时使用
 - `--scale-factor` / `PHONE_AGENT_IOS_SCALE_FACTOR`：若点击/滑动有偏移，可手动指定 1/2/3
-- `--list-apps`：查看内置 App 名 -> bundleId 映射（位于 `phone_agent/config/apps_ios.py`）
+- `--list-apps`：查看内置 App 名 -> bundleId 映射（位于 `phone_agent/ios/apps.py`）
 
 说明：iOS 端只依赖 WebDriverAgent（WDA）可达，不需要安装 `libimobiledevice`。
 

@@ -97,7 +97,7 @@ Optional flags:
 
 - `--insecure`: disable TLS verification for an https WDA URL
 - `--scale-factor` / `PHONE_AGENT_IOS_SCALE_FACTOR`: set to 1/2/3 if taps/swipes drift
-- `--list-apps`: show built-in app name -> bundleId mapping (`phone_agent/config/apps_ios.py`)
+- `--list-apps`: show built-in app name -> bundleId mapping (`phone_agent/ios/apps.py`)
 
 Note: The iOS path only requires a reachable WDA endpoint (no `libimobiledevice` dependency).
 

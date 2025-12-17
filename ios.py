@@ -20,11 +20,11 @@ import argparse
 import os
 import sys
 
-from phone_agent.agent_ios import IOSAgentConfig, IOSPhoneAgent
+from phone_agent.ios import IOSAgentConfig, IOSPhoneAgent
 from phone_agent.cli_checks import check_model_api
-from phone_agent.config.apps_ios import list_supported_apps
+from phone_agent.ios.apps import list_supported_apps
 from phone_agent.model import ModelConfig
-from phone_agent.wda import WDAConnection
+from phone_agent.ios.wda import WDAConnection
 
 
 def _env_truthy(name: str) -> bool:
@@ -264,7 +264,7 @@ def main():
     if args.list_apps:
         print("Supported iOS apps:")
         print("\nNote: For iOS apps, Bundle IDs are configured in:")
-        print("  phone_agent/config/apps_ios.py")
+        print("  phone_agent/ios/apps.py")
         print("\nCurrently configured apps:")
         for app in sorted(list_supported_apps()):
             print(f"  - {app}")

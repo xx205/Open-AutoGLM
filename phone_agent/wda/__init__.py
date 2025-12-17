@@ -1,32 +1,30 @@
-"""WebDriverAgent (WDA) utilities for iOS device interaction."""
+"""Backward-compatible import path for the iOS WebDriverAgent (WDA) backend.
 
-from phone_agent.wda.connection import (
+Prefer importing from `phone_agent.ios.wda`.
+"""
+
+from phone_agent.ios.wda import (  # noqa: F401
     WDAConnection,
-    quick_connect,
-)
-from phone_agent.wda.device import (
     back,
+    clear_text,
     double_tap,
     get_current_app,
+    get_screenshot,
     home,
     launch_app,
     long_press,
+    quick_connect,
     swipe,
     tap,
-)
-from phone_agent.wda.input import (
-    clear_text,
     type_text,
 )
-from phone_agent.wda.screenshot import get_screenshot
 
 __all__ = [
-    # Screenshot
+    "WDAConnection",
+    "quick_connect",
     "get_screenshot",
-    # Input
     "type_text",
     "clear_text",
-    # Device control
     "get_current_app",
     "tap",
     "swipe",
@@ -35,7 +33,5 @@ __all__ = [
     "double_tap",
     "long_press",
     "launch_app",
-    # Connection management
-    "WDAConnection",
-    "quick_connect",
 ]
+

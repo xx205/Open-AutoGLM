@@ -1,6 +1,9 @@
 """WebDriverAgent (WDA) connection management.
 
-To control a device, provide a reachable WDA URL (usually over Wi‑Fi).
+To control a device, provide a reachable WDA URL.
+
+- Wi‑Fi (recommended): http://<device-ip>:8100
+- USB: forward :8100 to this machine (then http://localhost:8100)
 """
 
 from phone_agent.xctest.wda_client import WDAClient, WDAError
@@ -19,7 +22,7 @@ class XCTestConnection:
 
         Args:
             wda_url: WebDriverAgent URL (default: http://localhost:8100).
-                     For network devices, use http://<device-ip>:8100
+                     For Wi‑Fi devices, use http://<device-ip>:8100
         """
         self.wda_url = wda_url.rstrip("/")
         self._client = WDAClient(self.wda_url, verify_tls=verify_tls)

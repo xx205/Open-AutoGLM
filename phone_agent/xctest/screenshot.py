@@ -39,7 +39,7 @@ def get_screenshot(
     Note:
         Uses WebDriverAgent endpoints. If screenshot fails, returns a black fallback image.
     """
-    # Try WebDriverAgent first (preferred method)
+    # Capture via WebDriverAgent.
     screenshot = _get_screenshot_wda(wda_url, session_id, timeout, client=client)
     if screenshot:
         return screenshot

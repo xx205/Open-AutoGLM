@@ -68,6 +68,39 @@ Python 3.10 or higher is recommended.
 Download the [installation package](https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk) and install it on the corresponding Android device.
 Note: After installation, you need to enable `ADB Keyboard` in `Settings > Input Method` or `Settings > Keyboard List` for it to work.(or use command `adb shell ime enable com.android.adbkeyboard/.AdbIME`[How-to-use](https://github.com/senzhk/ADBKeyBoard/blob/master/README.md#how-to-use))
 
+## iPhone (iOS) Setup
+
+iOS automation is driven by WebDriverAgent (WDA). You need macOS + Xcode to build and run WDA on your iPhone.
+
+### 1. Run WebDriverAgent on the Device
+
+1. Clone WebDriverAgent:
+
+```bash
+git clone https://github.com/appium/WebDriverAgent.git
+cd WebDriverAgent
+```
+
+2. Open `WebDriverAgent.xcodeproj` in Xcode, configure Signing & Capabilities for `WebDriverAgentRunner`.
+3. Run it as a UI test: `Product > Test` (Cmd+U).
+
+Make sure `http://<iphone-ip>:8100/status` is reachable from the machine running AutoGLM (Wi‑Fi is recommended; USB also works if you forward the port to this machine).
+
+### 2. Run the iOS Agent
+
+```bash
+python ios.py --wda-url http://<iphone-ip>:8100 --wda-status
+python ios.py --wda-url http://<iphone-ip>:8100 --base-url http://localhost:8000/v1 --model "autoglm-phone-9b-multilingual" "Open Safari and search for iPhone tips"
+```
+
+Optional flags:
+
+- `--insecure`: disable TLS verification for an https WDA URL
+- `--scale-factor` / `PHONE_AGENT_IOS_SCALE_FACTOR`: set to 1/2/3 if taps/swipes drift
+- `--list-apps`: show built-in app name -> bundleId mapping (`phone_agent/config/apps_ios.py`)
+
+Note: The iOS path only requires a reachable WDA endpoint (no `libimobiledevice` dependency).
+
 ## Deployment Preparation
 
 ### 1. Install Dependencies

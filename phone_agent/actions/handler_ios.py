@@ -27,6 +27,9 @@ class IOSActionHandler(BaseActionHandler):
     Args:
         wda_url: WebDriverAgent URL.
         session_id: Optional WDA session ID.
+        scale_factor: Coordinate scale factor from screenshot pixels to WDA points.
+            If omitted, it is auto-detected based on WDA `window/size` vs screenshot size.
+        verify_tls: Verify TLS certificates when using an https WDA URL.
         confirmation_callback: Optional callback for sensitive action confirmation.
             Should return True to proceed, False to cancel.
         takeover_callback: Optional callback for takeover requests (login, captcha).

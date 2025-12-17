@@ -13,6 +13,7 @@ Environment Variables:
     PHONE_AGENT_WDA_URL: WebDriverAgent URL (default: http://localhost:8100)
     PHONE_AGENT_WDA_INSECURE: Disable TLS verification for WDA HTTPS URL (optional)
     PHONE_AGENT_IOS_SCALE_FACTOR: Override iOS coordinate scale factor (optional)
+    PHONE_AGENT_LANG: Language for system prompt (cn or en, default: cn)
 """
 
 import argparse
@@ -41,7 +42,7 @@ def check_system_requirements(
     1. WebDriverAgent is running and reachable
 
     Args:
-        wda_url: WebDriverAgent URL to check (recommended: WiFi reachable URL).
+        wda_url: WebDriverAgent URL to check (must be reachable from this machine).
 
     Returns:
         True if all checks pass, False otherwise.
@@ -68,12 +69,17 @@ def check_system_requirements(
             print("   Error: WebDriverAgent is not running or not accessible.")
             print("   Solution:")
             print("     1. Run WebDriverAgent on your iOS device via Xcode")
-            print("     2. Ensure your Mac and iPhone are on the same WiFi network")
             print(
-                "     3. Use device IP, e.g., --wda-url http://192.168.1.100:8100"
+                "     2. Ensure the WDA URL is reachable from this machine:"
             )
             print(
-                f"     4. Verify in browser: open {wda_url.rstrip('/')}/status"
+                "        - Wi‑Fi: use device IP, e.g. --wda-url http://192.168.1.100:8100"
+            )
+            print(
+                "        - USB: forward :8100 to this machine, then use --wda-url http://localhost:8100"
+            )
+            print(
+                f"     3. Verify in browser: open {wda_url.rstrip('/')}/status"
             )
             print("\n   Quick setup guide:")
             print(

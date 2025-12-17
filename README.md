@@ -126,6 +126,28 @@ cd WebDriverAgent
 
 ![启用UI自动化](resources/enable-ui-automation.jpg)
 
+### 3. 运行 iOS 版 Phone Agent
+
+1) 确认 WDA 可访问：
+
+```bash
+python ios.py --wda-url http://<iphone-ip>:8100 --wda-status
+```
+
+2) 开始执行任务：
+
+```bash
+python ios.py --wda-url http://<iphone-ip>:8100 --base-url http://localhost:8000/v1 --model "autoglm-phone-9b" "打开Safari搜索iPhone使用技巧"
+```
+
+可选参数：
+
+- `--insecure`：当 WDA 使用 https 且证书无法校验时使用
+- `--scale-factor` / `PHONE_AGENT_IOS_SCALE_FACTOR`：若点击/滑动有偏移，可手动指定 1/2/3
+- `--list-apps`：查看内置 App 名 -> bundleId 映射（位于 `phone_agent/config/apps_ios.py`）
+
+说明：iOS 端只依赖 WebDriverAgent（WDA）可达，不需要安装 `libimobiledevice`。
+
 ## 部署准备工作
 
 ### 1. 安装依赖

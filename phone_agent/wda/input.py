@@ -2,7 +2,7 @@
 
 import time
 
-from phone_agent.xctest.wda_client import WDAClient, WDAError
+from phone_agent.wda.wda_client import WDAClient, WDAError
 
 def _get_client(
     wda_url: str, session_id: str | None, client: WDAClient | None

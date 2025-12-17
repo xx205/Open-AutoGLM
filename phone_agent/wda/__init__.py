@@ -1,10 +1,10 @@
-"""XCTest utilities for iOS device interaction via WebDriverAgent/XCUITest."""
+"""WebDriverAgent (WDA) utilities for iOS device interaction."""
 
-from phone_agent.xctest.connection import (
-    XCTestConnection,
+from phone_agent.wda.connection import (
+    WDAConnection,
     quick_connect,
 )
-from phone_agent.xctest.device import (
+from phone_agent.wda.device import (
     back,
     double_tap,
     get_current_app,
@@ -14,11 +14,11 @@ from phone_agent.xctest.device import (
     swipe,
     tap,
 )
-from phone_agent.xctest.input import (
+from phone_agent.wda.input import (
     clear_text,
     type_text,
 )
-from phone_agent.xctest.screenshot import get_screenshot
+from phone_agent.wda.screenshot import get_screenshot
 
 __all__ = [
     # Screenshot
@@ -36,6 +36,6 @@ __all__ = [
     "long_press",
     "launch_app",
     # Connection management
-    "XCTestConnection",
+    "WDAConnection",
     "quick_connect",
 ]

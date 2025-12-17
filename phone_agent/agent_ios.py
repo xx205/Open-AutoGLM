@@ -6,8 +6,8 @@ from typing import Callable
 from phone_agent.actions.handler_ios import IOSActionHandler
 from phone_agent.agent_base import BaseAgentConfig, BasePhoneAgent, StepResult
 from phone_agent.model import ModelConfig
-from phone_agent.xctest import XCTestConnection, get_current_app, get_screenshot
-from phone_agent.xctest.wda_client import WDAClient
+from phone_agent.wda import WDAConnection, get_current_app, get_screenshot
+from phone_agent.wda.wda_client import WDAClient
 
 
 @dataclass
@@ -54,7 +54,7 @@ class IOSPhoneAgent(BasePhoneAgent):
         resolved_agent_config = agent_config or IOSAgentConfig()
 
         # Initialize WDA connection and create session if needed
-        self.wda_connection = XCTestConnection(
+        self.wda_connection = WDAConnection(
             wda_url=resolved_agent_config.wda_url, verify_tls=resolved_agent_config.verify_tls
         )
 

@@ -6,10 +6,10 @@ To control a device, provide a reachable WDA URL.
 - USB: forward :8100 to this machine (then http://localhost:8100)
 """
 
-from phone_agent.xctest.wda_client import WDAClient, WDAError
+from phone_agent.wda.wda_client import WDAClient, WDAError
 
 
-class XCTestConnection:
+class WDAConnection:
     """
     Manages a WebDriverAgent endpoint and sessions.
 
@@ -18,7 +18,7 @@ class XCTestConnection:
 
     def __init__(self, wda_url: str = "http://localhost:8100", *, verify_tls: bool = True):
         """
-        Initialize iOS connection manager.
+        Initialize WDA connection manager.
 
         Args:
             wda_url: WebDriverAgent URL (default: http://localhost:8100).
@@ -109,7 +109,7 @@ def quick_connect(wda_url: str = "http://localhost:8100") -> tuple[bool, str]:
     Returns:
         Tuple of (success, message).
     """
-    conn = XCTestConnection(wda_url=wda_url)
+    conn = WDAConnection(wda_url=wda_url)
 
     if not conn.is_wda_ready():
         return False, "WebDriverAgent is not running"

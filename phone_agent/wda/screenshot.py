@@ -6,7 +6,7 @@ from io import BytesIO
 
 from PIL import Image
 
-from phone_agent.xctest.wda_client import WDAClient, WDAError
+from phone_agent.wda.wda_client import WDAClient, WDAError
 
 
 @dataclass

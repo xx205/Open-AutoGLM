@@ -24,7 +24,7 @@ from phone_agent.agent_ios import IOSAgentConfig, IOSPhoneAgent
 from phone_agent.cli_checks import check_model_api
 from phone_agent.config.apps_ios import list_supported_apps
 from phone_agent.model import ModelConfig
-from phone_agent.xctest import XCTestConnection
+from phone_agent.wda import WDAConnection
 
 
 def _env_truthy(name: str) -> bool:
@@ -55,7 +55,7 @@ def check_system_requirements(
     # Check 1: WebDriverAgent running
     print(f"1. Checking WebDriverAgent ({wda_url})...", end=" ")
     try:
-        conn = XCTestConnection(wda_url=wda_url, verify_tls=verify_tls)
+        conn = WDAConnection(wda_url=wda_url, verify_tls=verify_tls)
 
         if conn.is_wda_ready():
             print("✅ OK")
@@ -222,7 +222,7 @@ def handle_device_commands(args) -> bool:
     Returns:
         True if a device command was handled (should exit), False otherwise.
     """
-    conn = XCTestConnection(wda_url=args.wda_url, verify_tls=not args.insecure)
+    conn = WDAConnection(wda_url=args.wda_url, verify_tls=not args.insecure)
 
     # Handle --wda-status
     if args.wda_status:

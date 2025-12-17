@@ -6,7 +6,7 @@ from typing import Any, Callable
 from phone_agent.actions.base_handler import BaseActionHandler
 from phone_agent.actions.types import ActionResult
 from phone_agent.config.timing import TIMING_CONFIG
-from phone_agent.xctest import (
+from phone_agent.wda import (
     back,
     double_tap,
     home,
@@ -15,9 +15,9 @@ from phone_agent.xctest import (
     swipe,
     tap,
 )
-from phone_agent.xctest.device import get_screen_size
-from phone_agent.xctest.input import clear_text, hide_keyboard, type_text
-from phone_agent.xctest.wda_client import WDAClient
+from phone_agent.wda.device import get_screen_size
+from phone_agent.wda.input import clear_text, hide_keyboard, type_text
+from phone_agent.wda.wda_client import WDAClient
 
 
 class IOSActionHandler(BaseActionHandler):

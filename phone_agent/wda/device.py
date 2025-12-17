@@ -4,7 +4,7 @@ import time
 
 from phone_agent.config.apps_ios import APP_PACKAGES_IOS as APP_PACKAGES
 from phone_agent.config.timing import TIMING_CONFIG
-from phone_agent.xctest.wda_client import WDAClient, WDAError
+from phone_agent.wda.wda_client import WDAClient, WDAError
 
 DEFAULT_SCREEN_SIZE = (375, 812)  # iPhone points (iPhone X and later)
 

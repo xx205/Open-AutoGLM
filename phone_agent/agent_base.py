@@ -7,7 +7,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-from phone_agent.actions.handler import finish, parse_action
+from phone_agent.actions.parsing import finish, parse_action
 from phone_agent.actions.types import ActionResult
 from phone_agent.config import get_messages, get_system_prompt
 from phone_agent.model import ModelClient, ModelConfig
@@ -211,4 +211,3 @@ class BasePhoneAgent:
     def step_count(self) -> int:
         """Get the current step count."""
         return self._step_count
-

@@ -1,8 +1,7 @@
 """Action handler for processing AI model outputs."""
 
-import ast
 import time
-from typing import Any, Callable
+from typing import Callable
 
 from phone_agent.adb import (
     back,
@@ -80,67 +79,3 @@ class ActionHandler(BaseActionHandler):
 
     def _long_press(self, x: int, y: int) -> None:
         long_press(x, y, device_id=self.device_id)
-
-
-def parse_action(response: str) -> dict[str, Any]:
-    """
-    Parse action from model response.
-
-    Args:
-        response: Raw response string from the model.
-
-    Returns:
-        Parsed action dictionary.
-
-    Raises:
-        ValueError: If the response cannot be parsed.
-    """
-    try:
-        response = response.strip()
-        if response.startswith('do(action="Type"') or response.startswith(
-            'do(action="Type_Name"'
-        ):
-            text = response.split("text=", 1)[1][1:-2]
-            action = {"_metadata": "do", "action": "Type", "text": text}
-            return action
-        elif response.startswith("do"):
-            # Use AST parsing instead of eval for safety
-            try:
-                tree = ast.parse(response, mode="eval")
-                if not isinstance(tree.body, ast.Call):
-                    raise ValueError("Expected a function call")
-
-                call = tree.body
-                # Extract keyword arguments safely
-                action = {"_metadata": "do"}
-                for keyword in call.keywords:
-                    key = keyword.arg
-                    value = ast.literal_eval(keyword.value)
-                    action[key] = value
-
-                return action
-            except (SyntaxError, ValueError) as e:
-                raise ValueError(f"Failed to parse do() action: {e}")
-
-        elif response.startswith("finish"):
-            action = {
-                "_metadata": "finish",
-                "message": response.replace("finish(message=", "")[1:-2],
-            }
-        else:
-            raise ValueError(f"Failed to parse action: {response}")
-        return action
-    except Exception as e:
-        raise ValueError(f"Failed to parse action: {e}")
-
-
-def do(**kwargs) -> dict[str, Any]:
-    """Helper function for creating 'do' actions."""
-    kwargs["_metadata"] = "do"
-    return kwargs
-
-
-def finish(**kwargs) -> dict[str, Any]:
-    """Helper function for creating 'finish' actions."""
-    kwargs["_metadata"] = "finish"
-    return kwargs

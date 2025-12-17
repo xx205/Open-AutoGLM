@@ -1,10 +1,7 @@
 """XCTest utilities for iOS device interaction via WebDriverAgent/XCUITest."""
 
 from phone_agent.xctest.connection import (
-    ConnectionType,
-    DeviceInfo,
     XCTestConnection,
-    list_devices,
     quick_connect,
 )
 from phone_agent.xctest.device import (
@@ -40,8 +37,5 @@ __all__ = [
     "launch_app",
     # Connection management
     "XCTestConnection",
-    "DeviceInfo",
-    "ConnectionType",
     "quick_connect",
-    "list_devices",
 ]

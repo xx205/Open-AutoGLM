@@ -12,21 +12,18 @@ Environment Variables:
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_WDA_URL: WebDriverAgent URL (default: http://localhost:8100)
     PHONE_AGENT_WDA_INSECURE: Disable TLS verification for WDA HTTPS URL (optional)
-    PHONE_AGENT_DEVICE_ID: iOS device UDID for multi-device setups
     PHONE_AGENT_IOS_SCALE_FACTOR: Override iOS coordinate scale factor (optional)
 """
 
 import argparse
 import os
-import shutil
-import subprocess
 import sys
 
 from phone_agent.agent_ios import IOSAgentConfig, IOSPhoneAgent
 from phone_agent.cli_checks import check_model_api
 from phone_agent.config.apps_ios import list_supported_apps
 from phone_agent.model import ModelConfig
-from phone_agent.xctest import XCTestConnection, list_devices
+from phone_agent.xctest import XCTestConnection
 
 
 def _env_truthy(name: str) -> bool:
@@ -41,12 +38,10 @@ def check_system_requirements(
     Check system requirements before running the agent.
 
     Checks:
-    1. libimobiledevice tools installed
-    2. At least one iOS device connected
-    3. WebDriverAgent is running
+    1. WebDriverAgent is running and reachable
 
     Args:
-        wda_url: WebDriverAgent URL to check.
+        wda_url: WebDriverAgent URL to check (recommended: WiFi reachable URL).
 
     Returns:
         True if all checks pass, False otherwise.
@@ -56,74 +51,8 @@ def check_system_requirements(
 
     all_passed = True
 
-    # Check 1: libimobiledevice installed
-    print("1. Checking libimobiledevice installation...", end=" ")
-    if shutil.which("idevice_id") is None:
-        print("❌ FAILED")
-        print("   Error: libimobiledevice is not installed or not in PATH.")
-        print("   Solution: Install libimobiledevice:")
-        print("     - macOS: brew install libimobiledevice")
-        print("     - Linux: sudo apt-get install libimobiledevice-utils")
-        all_passed = False
-    else:
-        # Double check by running idevice_id
-        try:
-            result = subprocess.run(
-                ["idevice_id", "-ln"], capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0:
-                print("✅ OK")
-            else:
-                print("❌ FAILED")
-                print("   Error: idevice_id command failed to run.")
-                all_passed = False
-        except FileNotFoundError:
-            print("❌ FAILED")
-            print("   Error: idevice_id command not found.")
-            all_passed = False
-        except subprocess.TimeoutExpired:
-            print("❌ FAILED")
-            print("   Error: idevice_id command timed out.")
-            all_passed = False
-
-    # If libimobiledevice is not installed, skip remaining checks
-    if not all_passed:
-        print("-" * 50)
-        print("❌ System check failed. Please fix the issues above.")
-        return False
-
-    # Check 2: iOS Device connected
-    print("2. Checking connected iOS devices...", end=" ")
-    try:
-        devices = list_devices()
-
-        if not devices:
-            print("❌ FAILED")
-            print("   Error: No iOS devices connected.")
-            print("   Solution:")
-            print("     1. Connect your iOS device via USB")
-            print("     2. Unlock the device and tap 'Trust This Computer'")
-            print("     3. Verify connection: idevice_id -l")
-            print("     4. Or connect via WiFi using device IP")
-            all_passed = False
-        else:
-            device_names = [
-                d.device_name or d.device_id[:8] + "..." for d in devices
-            ]
-            print(f"✅ OK ({len(devices)} device(s): {', '.join(device_names)})")
-    except Exception as e:
-        print("❌ FAILED")
-        print(f"   Error: {e}")
-        all_passed = False
-
-    # If no device connected, skip WebDriverAgent check
-    if not all_passed:
-        print("-" * 50)
-        print("❌ System check failed. Please fix the issues above.")
-        return False
-
-    # Check 3: WebDriverAgent running
-    print(f"3. Checking WebDriverAgent ({wda_url})...", end=" ")
+    # Check 1: WebDriverAgent running
+    print(f"1. Checking WebDriverAgent ({wda_url})...", end=" ")
     try:
         conn = XCTestConnection(wda_url=wda_url, verify_tls=verify_tls)
 
@@ -139,11 +68,13 @@ def check_system_requirements(
             print("   Error: WebDriverAgent is not running or not accessible.")
             print("   Solution:")
             print("     1. Run WebDriverAgent on your iOS device via Xcode")
-            print("     2. For USB: Set up port forwarding: iproxy 8100 8100")
+            print("     2. Ensure your Mac and iPhone are on the same WiFi network")
             print(
-                "     3. For WiFi: Use device IP, e.g., --wda-url http://192.168.1.100:8100"
+                "     3. Use device IP, e.g., --wda-url http://192.168.1.100:8100"
             )
-            print("     4. Verify in browser: open http://localhost:8100/status")
+            print(
+                f"     4. Verify in browser: open {wda_url.rstrip('/')}/status"
+            )
             print("\n   Quick setup guide:")
             print(
                 "     git clone https://github.com/appium/WebDriverAgent.git && cd WebDriverAgent"
@@ -180,17 +111,8 @@ Examples:
     # Specify model endpoint
     python ios.py --base-url http://localhost:8000/v1
 
-    # Run with specific device
-    python ios.py --device-id <UDID>
-
     # Use WiFi connection
     python ios.py --wda-url http://192.168.1.100:8100
-
-    # List connected devices
-    python ios.py --list-devices
-
-    # Check device pairing status
-    python ios.py --pair
 
     # List supported apps
     python ios.py --list-apps
@@ -233,14 +155,6 @@ Examples:
 
     # iOS Device options
     parser.add_argument(
-        "--device-id",
-        "-d",
-        type=str,
-        default=os.getenv("PHONE_AGENT_DEVICE_ID"),
-        help="iOS device UDID",
-    )
-
-    parser.add_argument(
         "--wda-url",
         type=str,
         default=os.getenv("PHONE_AGENT_WDA_URL", "http://localhost:8100"),
@@ -260,16 +174,6 @@ Examples:
         type=float,
         default=float(scale_factor_env) if scale_factor_env else None,
         help="Override iOS coordinate scale factor (auto-detected if omitted)",
-    )
-
-    parser.add_argument(
-        "--list-devices", action="store_true", help="List connected iOS devices and exit"
-    )
-
-    parser.add_argument(
-        "--pair",
-        action="store_true",
-        help="Pair with iOS device (required for some operations)",
     )
 
     parser.add_argument(
@@ -314,39 +218,6 @@ def handle_device_commands(args) -> bool:
     """
     conn = XCTestConnection(wda_url=args.wda_url, verify_tls=not args.insecure)
 
-    # Handle --list-devices
-    if args.list_devices:
-        devices = list_devices()
-        if not devices:
-            print("No iOS devices connected.")
-            print("\nTroubleshooting:")
-            print("  1. Connect device via USB")
-            print("  2. Unlock device and trust this computer")
-            print("  3. Run: idevice_id -l")
-        else:
-            print("Connected iOS devices:")
-            print("-" * 70)
-            for device in devices:
-                conn_type = device.connection_type.value
-                model_info = f"{device.model}" if device.model else "Unknown"
-                ios_info = f"iOS {device.ios_version}" if device.ios_version else ""
-                name_info = device.device_name or "Unnamed"
-
-                print(f"  ✓ {name_info}")
-                print(f"    UDID: {device.device_id}")
-                print(f"    Model: {model_info}")
-                print(f"    OS: {ios_info}")
-                print(f"    Connection: {conn_type}")
-                print("-" * 70)
-        return True
-
-    # Handle --pair
-    if args.pair:
-        print("Pairing with iOS device...")
-        success, message = conn.pair_device(args.device_id)
-        print(f"{'✓' if success else '✗'} {message}")
-        return True
-
     # Handle --wda-status
     if args.wda_status:
         print(f"Checking WebDriverAgent status at {args.wda_url}...")
@@ -371,9 +242,8 @@ def handle_device_commands(args) -> bool:
             print("✗ WebDriverAgent is not running")
             print("\nPlease start WebDriverAgent on your iOS device:")
             print("  1. Open WebDriverAgent.xcodeproj in Xcode")
-            print("  2. Select your device")
+            print("  2. Select your device (over WiFi is recommended)")
             print("  3. Run WebDriverAgentRunner (Product > Test or Cmd+U)")
-            print(f"  4. For USB: Run port forwarding: iproxy 8100 8100")
 
         return True
 
@@ -419,7 +289,6 @@ def main():
     agent_config = IOSAgentConfig(
         max_steps=args.max_steps,
         wda_url=args.wda_url,
-        device_id=args.device_id,
         scale_factor=args.scale_factor,
         verify_tls=not args.insecure,
         verbose=not args.quiet,
@@ -441,15 +310,6 @@ def main():
     print(f"WDA URL: {args.wda_url}")
     print(f"Max Steps: {agent_config.max_steps}")
     print(f"Language: {agent_config.lang}")
-
-    # Show device info
-    devices = list_devices()
-    if agent_config.device_id:
-        print(f"Device: {agent_config.device_id}")
-    elif devices:
-        device = devices[0]
-        print(f"Device: {device.device_name or device.device_id[:16]}")
-        print(f"        {device.model}, iOS {device.ios_version}")
 
     print("=" * 50)
 

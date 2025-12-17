@@ -16,7 +16,6 @@ class IOSAgentConfig(BaseAgentConfig):
 
     wda_url: str = "http://localhost:8100"
     session_id: str | None = None
-    device_id: str | None = None  # iOS device UDID
     scale_factor: float | None = None
     verify_tls: bool = True
 
@@ -91,7 +90,6 @@ class IOSPhoneAgent(BasePhoneAgent):
             get_screenshot=lambda: get_screenshot(
                 wda_url=resolved_agent_config.wda_url,
                 session_id=resolved_agent_config.session_id,
-                device_id=resolved_agent_config.device_id,
                 client=wda_client,
             ),
             get_current_app=lambda: get_current_app(

@@ -108,7 +108,7 @@ cd WebDriverAgent
 
 需要在Finder勾选过“在WiFi中显示这台iPhone”，且Mac与iPhone处于同一WiFi网络之下，可以不用连接数据线，即可在设备中选择到。
 
-**注意：** 不建议插数据线运行，因为插数据线还必须要同时运行iproxy才可以把端口映射出来，不及直接WiFi运行稳定。
+**注意：** 推荐通过 Wi‑Fi 连接运行（更稳定、配置更简单）。如需使用 USB，请自行确保 `:8100` 端口能在本机访问到。
 
 先从项目Target选择WebDriverAgentRunner，然后再选择你的设备。
 

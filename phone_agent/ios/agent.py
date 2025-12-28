@@ -60,13 +60,31 @@ class IOSPhoneAgent(BasePhoneAgent):
 
         # Auto-create session if not provided
         if resolved_agent_config.session_id is None:
-            success, session_id = self.wda_connection.start_wda_session()
-            if success and session_id != "session_started":
+            success, result = self.wda_connection.start_wda_session()
+            session_id = result if success and result != "session_started" else None
+
+            if session_id:
                 resolved_agent_config.session_id = session_id
                 if resolved_agent_config.verbose:
                     print(f"✅ Created WDA session: {session_id}")
-            elif resolved_agent_config.verbose:
-                print(f"⚠️  Using default WDA session (no explicit session ID)")
+            else:
+                existing_sessions = self.wda_connection.list_wda_sessions()
+                session_id = existing_sessions[0] if existing_sessions else None
+
+                if session_id:
+                    resolved_agent_config.session_id = session_id
+                    if resolved_agent_config.verbose:
+                        if success:
+                            print(f"✅ Using detected WDA session: {session_id}")
+                        else:
+                            print(
+                                f"⚠️  Failed to create WDA session; reusing existing session: {session_id}"
+                            )
+                else:
+                    error = result if not success else "WDA did not return a session id"
+                    raise RuntimeError(
+                        f"{error}. Please restart WebDriverAgent and try again."
+                    )
 
         action_handler = IOSActionHandler(
             wda_url=resolved_agent_config.wda_url,

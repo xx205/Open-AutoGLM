@@ -9,6 +9,60 @@ To control a device, provide a reachable WDA URL.
 from phone_agent.ios.wda.wda_client import WDAClient, WDAError
 
 
+def _extract_session_ids(payload: object) -> list[str]:
+    session_ids: list[str] = []
+
+    if isinstance(payload, dict):
+        top_session_id = payload.get("sessionId")
+        if isinstance(top_session_id, str) and top_session_id:
+            session_ids.append(top_session_id)
+
+        value = payload.get("value")
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                candidate = item.get("id") or item.get("sessionId")
+                if isinstance(candidate, str) and candidate:
+                    session_ids.append(candidate)
+        elif isinstance(value, dict):
+            candidate = value.get("id") or value.get("sessionId")
+            if isinstance(candidate, str) and candidate:
+                session_ids.append(candidate)
+    elif isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("id") or item.get("sessionId")
+            if isinstance(candidate, str) and candidate:
+                session_ids.append(candidate)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for session_id in session_ids:
+        if session_id in seen:
+            continue
+        seen.add(session_id)
+        deduped.append(session_id)
+    return deduped
+
+
+def _extract_session_id_from_status(status: object) -> str | None:
+    if not isinstance(status, dict):
+        return None
+
+    top_session_id = status.get("sessionId")
+    if isinstance(top_session_id, str) and top_session_id:
+        return top_session_id
+
+    value = status.get("value")
+    if isinstance(value, dict):
+        value_session_id = value.get("sessionId")
+        if isinstance(value_session_id, str) and value_session_id:
+            return value_session_id
+    return None
+
+
 class WDAConnection:
     """
     Manages a WebDriverAgent endpoint and sessions.
@@ -62,9 +116,27 @@ class WDAConnection:
             session_id = None
             if isinstance(data, dict):
                 session_id = data.get("sessionId") or data.get("value", {}).get("sessionId")
+            if not session_id:
+                session_ids = self.list_wda_sessions()
+                if session_ids:
+                    session_id = session_ids[0]
             return True, session_id or "session_started"
         except WDAError as e:
             return False, str(e)
+
+    def list_wda_sessions(self) -> list[str]:
+        """List active WDA session IDs, if supported by the server."""
+        try:
+            data = self._client.get("sessions", use_session=False, timeout=5.0)
+            session_ids = _extract_session_ids(data)
+            if session_ids:
+                return session_ids
+        except WDAError:
+            pass
+
+        status = self.get_wda_status()
+        session_id = _extract_session_id_from_status(status) if status else None
+        return [session_id] if session_id else []
 
     def get_wda_status(self) -> dict | None:
         """

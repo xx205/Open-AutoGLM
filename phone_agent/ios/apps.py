@@ -12,6 +12,7 @@ APP_PACKAGES_IOS: dict[str, str] = {
     "微信听书": "com.tencent.wehear",
     "QQ": "com.tencent.mqq",
     "QQ音乐": "com.tencent.QQMusic",
+    "QQ 音乐": "com.tencent.QQMusic",
     "QQ阅读": "com.tencent.qqreaderiphone",
     "QQ邮箱": "com.tencent.qqmail",
     "QQ浏览器": "com.tencent.mttlite",

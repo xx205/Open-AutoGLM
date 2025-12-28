@@ -70,7 +70,7 @@ Note: After installation, you need to enable `ADB Keyboard` in `Settings > Input
 
 ## iPhone (iOS) Setup
 
-iOS automation is driven by WebDriverAgent (WDA). You need macOS + Xcode to build and run WDA on your iPhone.
+iOS automation is driven by WebDriverAgent (WDA). You need macOS + Xcode to build and run WDA on your iPhone, and an Apple developer account (no paid membership required).
 
 ### 1. Run WebDriverAgent on the Device
 
@@ -84,7 +84,13 @@ cd WebDriverAgent
 2. Open `WebDriverAgent.xcodeproj` in Xcode, configure Signing & Capabilities for `WebDriverAgentRunner`.
 3. Run it as a UI test: `Product > Test` (Cmd+U).
 
-Make sure `http://<iphone-ip>:8100/status` is reachable from the machine running AutoGLM (Wi‑Fi is recommended; USB also works if you forward the port to this machine).
+If you enable “Show this iPhone when on Wi‑Fi” in Finder and make sure your Mac and iPhone are on the same WiFi network, you can run without a USB cable.
+
+**Note:** We recommend running over Wi‑Fi (more stable and simpler). If you use USB, make sure the `:8100` port is reachable on this machine.
+
+When running for the first time, you may need to unlock the iPhone, trust the developer app under `Settings -> General -> VPN & Device Management`, and enable UI automation under `Settings -> Developer`.
+
+Make sure `http://<iphone-ip>:8100/status` is reachable from the machine running AutoGLM.
 
 ### 2. Run the iOS Agent
 
@@ -360,7 +366,10 @@ You can directly modify the corresponding config files to enhance model capabili
 | `PHONE_AGENT_API_KEY`     | API key for authentication| `EMPTY`                    |
 | `PHONE_AGENT_MAX_STEPS`   | Maximum steps per task    | `100`                      |
 | `PHONE_AGENT_DEVICE_ID`   | ADB device ID             | (auto-detect)              |
-| `PHONE_AGENT_LANG`        | Language (`cn` or `en`)   | `en`                       |
+| `PHONE_AGENT_LANG`        | Language (`cn` or `en`)   | `cn`                       |
+| `PHONE_AGENT_WDA_URL`     | WebDriverAgent URL (iOS)  | `http://localhost:8100`    |
+| `PHONE_AGENT_WDA_INSECURE`| Disable WDA TLS verify    | (optional)                 |
+| `PHONE_AGENT_IOS_SCALE_FACTOR` | Override iOS coordinate scale factor | (auto-detected)    |
 
 ### Model Configuration
 
@@ -512,21 +521,39 @@ pytest tests/
 
 ```
 phone_agent/
-├── __init__.py          # Package exports
-├── agent.py             # PhoneAgent main class
-├── adb/                 # ADB utilities
-│   ├── connection.py    # Remote/local connection management
-│   ├── screenshot.py    # Screen capture
-│   ├── input.py         # Text input (ADB Keyboard)
-│   └── device.py        # Device control (tap, swipe, etc.)
-├── actions/             # Action handling
-│   └── handler.py       # Action executor
-├── config/              # Configuration
-│   ├── apps.py          # Supported app mappings
-│   ├── prompts_zh.py    # Chinese system prompts
-│   └── prompts_en.py    # English system prompts
-└── model/               # AI model client
-    └── client.py        # OpenAI-compatible client
+├── __init__.py              # package exports
+├── agent.py                 # Android PhoneAgent
+├── agent_base.py            # shared agent loop/base
+├── cli_checks.py            # CLI preflight checks
+├── adb/                     # Android ADB tooling
+│   ├── connection.py        # remote/local connection management
+│   ├── screenshot.py        # screenshots
+│   ├── input.py             # text input (ADB Keyboard)
+│   └── device.py            # device control (tap/swipe/etc.)
+├── ios/                     # iOS implementation
+│   ├── agent.py             # IOSPhoneAgent
+│   ├── action_handler.py    # iOS action handler
+│   ├── apps.py              # app name -> bundleId mapping
+│   └── wda/                 # WebDriverAgent (WDA) HTTP wrapper
+│       ├── wda_client.py    # WDA client
+│       ├── device.py        # touch/system actions
+│       ├── input.py         # text input
+│       ├── screenshot.py    # screenshots
+│       └── connection.py    # health checks
+├── actions/                 # action handling
+│   ├── base_handler.py      # base handler
+│   ├── handler.py           # Android handler
+│   ├── parsing.py           # action parsing/cleanup
+│   └── types.py             # action types
+├── config/                  # configuration
+│   ├── apps.py              # supported apps mapping (Android)
+│   ├── i18n.py              # i18n strings
+│   ├── prompts.py           # prompt entrypoint
+│   ├── prompts_zh.py        # Chinese system prompt
+│   ├── prompts_en.py        # English system prompt
+│   └── timing.py            # timing config
+└── model/                   # model client
+    └── client.py            # OpenAI-compatible client
 ```
 
 ## FAQ

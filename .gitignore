@@ -39,6 +39,8 @@ env/
 htmlcov/
 .tox/
 .nox/
+*.xcresult
+xcresult.json
 
 # Type checking
 .mypy_cache/

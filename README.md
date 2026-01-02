@@ -89,30 +89,177 @@ WebDriverAgent 是 iOS 自动化的核心组件，需要在 iOS 设备上运行�
 
 注意：需要提前安装好 Xcode、并注册好苹果开发者账号（不需要付费）
 
-#### 1. 克隆 WebDriverAgent
+#### 0. 背景：iOS 自动化里 WDA / Xcode / Runner 分别是什么
+
+iOS 没有像 Android 那样通用的 ADB 入口。要在 iPhone 上做“点/滑/输入/截图”，通常需要走苹果的 **XCUITest**（Xcode 的 UI 自动化测试框架）。
+
+WebDriverAgent（WDA）可以理解为：把 XCUITest 的能力封装成一个可通过 HTTP 调用的服务。AutoGLM iOS 版就是“发 HTTP 请求给 WDA”，由 WDA 在手机上执行触控/输入/截图。
+
+这条链路的关系可以简化为：
+
+`AutoGLM (Mac)  --HTTP-->  WDA (iPhone)  --XCUITest-->  iOS UI`
+
+下面把几个最容易混淆的名词解释清楚：
+
+- **WDA 是什么**
+  - WDA 在 iPhone 上跑起来后，会对外提供一个 HTTP 服务（默认端口 `8100`，常用检查接口是 `/status`）。
+  - 你看到的 `http://...:8100/status` 能不能访问，本质就是“WDA 是否在跑 + 你的电脑能不能连到它”。
+
+- **Xcode 在这里做什么**
+  - 负责把 WDA 编译、签名并安装到 iPhone 上（iOS 应用必须签名才能安装运行）。
+  - 负责启动一段 UI Test，会话里会把 WDA 的服务跑起来。
+
+- **Runner 是什么（为什么手机设置里会出现 `WebDriverAgentRunner-Runner`）**
+  - `WebDriverAgentRunner-Runner` 是 Xcode 跑 UI Test 时生成/安装到手机上的 **测试 Runner App**（你会在 iPhone `设置 -> 应用` 里看到它）。
+  - 它不是你在工程里手动创建的一个 Target；工程里你需要配置的是 `WebDriverAgentRunner` 这个 Target（尤其是签名和 `PRODUCT_BUNDLE_IDENTIFIER`）。
+  - 文档里说的“已安装 Runner”，意思就是：手机上已经能看到 `WebDriverAgentRunner-Runner` 这个 App（通常说明你至少成功跑通过一次 `Product > Test`）。
+
+- **WDA URL 是什么（你要传给 `ios.py --wda-url` 的值）**
+  - 它就是“运行 AutoGLM 的机器访问 WDA 的入口地址”：
+    - **Wi‑Fi 直连**：`http://<iphone-ip>:8100`（依赖局域网互访；并且 iPhone 上该 App 的 `Wireless Data` 不能是 Off）
+    - **USB + 端口转发**：用 `iproxy 8100 8100` 转发后访问 `http://127.0.0.1:8100`（最稳，完全绕开路由器/局域网策略）
+
+你可以把整个流程拆成两步：
+
+1) 让 WDA 在 iPhone 上启动起来（Runner 在跑，端口 8100 在监听）  
+2) 选择一种方式让电脑能连上它（Wi‑Fi 直连 或 `iproxy` 转发）
+
+#### 1. 推荐完整流程（优先 Wi‑Fi 直连 + 日常不再跑 xcodebuild）
+
+这条流程的目标是：**只用 Xcode 安装/签名一次**，后续通过 `devicectl` 启动已安装的 Runner，从而尽量避免 Runner 被反复安装/更新导致的权限开关复位。
+
+##### 1.1 一次性准备：安装 Runner（首次必做）
+
+1) 克隆 WebDriverAgent：
 
 ```bash
-
 git clone https://github.com/appium/WebDriverAgent.git
 cd WebDriverAgent
 ```
-在 Xcode 中打开 WebDriverAgent.xcodeproj
+2) 在 Xcode 中打开 `WebDriverAgent.xcodeproj`，配置 Signing & Capabilities。
 
-#### 2. 设置 Signing & Capabilities
+把 `WebDriverAgentRunner` 这个 Target 的 Bundle Identifier（`PRODUCT_BUNDLE_IDENTIFIER`）改成你自己的固定值（例如 `YOUR_NAME.WebDriverAgentRunner`），并尽量保持长期不变（避免 iOS 把它当成新 App 重装导致权限/开关重置）。
 
-把 Bundle ID 改成 YOUR_NAME.WebDriverAgentRunner。
+说明：你在 iPhone“设置 -> 应用”里看到的 `WebDriverAgentRunner-Runner` 并不是工程里的一个 Target，而是 Xcode 运行 UI Test 时自动生成/安装的 Runner App（通常基于 `WebDriverAgentRunner` 派生，名字会带 `-Runner`）。
 
-#### 3. 开始 UI 测试
+3) 选择 `WebDriverAgentRunner` scheme 和你的 iPhone 设备，执行 `Product > Test`（或 `Cmd+U`）。
 
-需要在 Finder 勾选过“在 WiFi 中显示这台 iPhone”，且 Mac 与 iPhone 处于同一 WiFi 网络之下，可以不用连接数据线，即可在设备中选择到。
+首次运行时，可能需要在 iPhone 上解锁并在 **设置 -> 通用 -> VPN 与设备管理** 中信任开发者 App。
 
-**注意：** 推荐通过 Wi‑Fi 连接运行（更稳定、配置更简单）。如需使用 USB，请自行确保 `:8100` 端口能在本机访问到。
+你只需要确保能跑通一次：手机上出现 `WebDriverAgentRunner-Runner`，并且 WDA 能对外提供 `/status`。
 
-先从项目 Target 选择 WebDriverAgentRunner，然后再选择你的设备。
+可选：更可控地“安装/更新一次 Runner”（后续只用 devicectl 启动）
 
-选好后，长按"▶️"运行按钮选择“Test”后开始编译并部署到你的 iPhone 上。
+如果你希望把“安装/更新”单独做一次（后续只做启动/停止），或者你在 iOS 17+ / 18 上遇到 `devicectl` 启动后立刻退出等问题，可以按 `docs/recipes/run_wda_preinstalled_devicectl.md` 的步骤做一次可控安装。这里给出最小操作摘要：
 
-这时需要你在 iPhone 上输入解锁密码，在设置 -> 通用 -> VPN 与设备管理 中信任开发者 App，还需要在 设置 -> 开发者 中，打开 UI 自动化设置。
+1) 找到 Xcode 编译产物里的 Runner `.app`（通常在 DerivedData）：
+
+```bash
+ls ~/Library/Developer/Xcode/DerivedData/WebDriverAgent-*/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app
+```
+
+2) （可选）准备一个“更适合 devicectl 启动”的 Runner（删除 `Frameworks/XC*.framework` 并重新签名）：
+
+```bash
+bash scripts/prepare_wda_runner_for_devicectl.sh \
+  --app ~/Library/Developer/Xcode/DerivedData/WebDriverAgent-*/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app \
+  --out /tmp/WDA-Prepared
+```
+
+3) 安装到设备（只需做一次，后续不再安装）：
+
+```bash
+xcrun devicectl device install app --device <UDID> /tmp/WDA-Prepared/WebDriverAgentRunner-Runner.app
+```
+
+其中 `<UDID>` 可通过 `xcrun devicectl list devices` 获取（见下方 1.3）。
+
+安装会覆盖/更新该 App，建议在安装完成后再按下面 1.2 把 `Wireless Data` 打开一次。
+
+##### 1.2 一次性准备：让 Wi‑Fi 访问可用（否则 `<iphone-ip>:8100` 会超时）
+
+如果你希望用 `http://<iphone-ip>:8100`（Wi‑Fi 直连），请务必检查 iPhone 上：
+
+`设置 -> App（或 应用）-> WebDriverAgentRunner-Runner -> 无线数据（Wireless Data）`
+
+把 **Off** 改成 **WLAN** 或 **WLAN & Cellular Data**。
+
+> 这是一个非常容易踩坑的点：开关为 Off 时，你会看到 `http://127.0.0.1:8100/status` 在 iPhone 上可访问，但 `http://<iphone-ip>:8100/status`（甚至 iPhone 自己访问 `<iphone-ip>`）会 timeout。  
+> 另外，如果你走的是“Wi‑Fi 连接运行 Xcode UI Test”，这个开关为 Off 也常见会导致设备日志出现 `Exiting due to IDE disconnection.`。
+
+##### 1.3 日常启动：用 devicectl 启动“已安装的 Runner”（不再跑 xcodebuild）
+
+1) 获取设备 UDID：
+
+```bash
+xcrun devicectl list devices
+```
+
+2) 获取 WDA `*.xctrunner` 的 bundle id（包含 `.xctrunner` 后缀）：
+
+```bash
+xcrun devicectl device info apps --device <UDID> --include-all-apps | grep -i WebDriverAgent
+```
+
+你需要选 **带 `.xctrunner` 后缀** 的那一行作为 `<WDA_XCTRUNNER_BUNDLE_ID>`。
+
+3) 启动（Wi‑Fi 直连）：
+
+```bash
+bash scripts/run_wda_preinstalled_devicectl.sh start \
+  --device <UDID> \
+  --bundle-id <WDA_XCTRUNNER_BUNDLE_ID> \
+  --wda-url http://<iphone-ip>:8100
+```
+
+其中 `<iphone-ip>` 可在 iPhone `设置 -> Wi‑Fi -> 当前网络` 里查看。
+
+4) 验证：
+
+```bash
+python ios.py --wda-url http://<iphone-ip>:8100 --wda-status
+```
+
+需要停止时：
+
+```bash
+bash scripts/run_wda_preinstalled_devicectl.sh stop --device <UDID> --bundle-id <WDA_XCTRUNNER_BUNDLE_ID>
+```
+
+#### 2. 方案选择（覆盖所有方案，按推荐顺序）
+
+如果你遇到下面这些情况，再从这里选其它方案：
+
+- 你还没装过 `WebDriverAgentRunner-Runner` / 需要签名排障 → 用 Xcode `Product > Test` 跑通一次
+- 你的局域网互访不稳定/受限 → 用 USB + `iproxy` 固定访问 `http://127.0.0.1:8100`
+- 你仍想走 UI Test，但想更快重启 → `build-for-testing` + `test-without-building`
+- 你希望工具链托管 XCTest 会话 → Appium（可选）
+
+决策树：
+
+- 优先 Wi‑Fi 直连（`http://<iphone-ip>:8100`）且希望日常不再跑 `xcodebuild ... test`
+  - 前提：手机上已安装 `WebDriverAgentRunner-Runner`
+  - 选：`devicectl --no-activate`（推荐）→ `docs/recipes/run_wda_preinstalled_devicectl.md`
+- 首次安装/签名排障
+  - 选：Xcode `Product > Test`（UI Test）
+- 最稳兜底（不依赖局域网互访）
+  - 选：USB + `iproxy` → `docs/recipes/iproxy_from_source.md`
+- 更快重启（仍走 UI Test）
+  - 选：`xcodebuild test-without-building` → `docs/recipes/run_wda_xcodebuild.md`
+- 可选：工具链托管 session
+  - 选：Appium “preinstalled WDA” → `docs/recipes/run_wda_preinstalled_appium.md`
+
+速查表：
+
+| 场景 | 启动 WDA | 访问 WDA | 入口 |
+| --- | --- | --- | --- |
+| **首选**：Wi‑Fi + 日常不再跑 `xcodebuild` | `devicectl --no-activate`（已安装 `WebDriverAgentRunner-Runner`） | `http://<iphone-ip>:8100` | `scripts/run_wda_preinstalled_devicectl.sh` |
+| 首次安装/签名排障 | Xcode `Product > Test`（UI Test） | Wi‑Fi：`http://<iphone-ip>:8100` | 本节 “安装 Runner” |
+| 最稳兜底（不依赖局域网互访） | Xcode / `devicectl` 均可 | `iproxy` → `http://127.0.0.1:8100` | `docs/recipes/iproxy_from_source.md` |
+| 更快重启（仍走 UI Test） | `xcodebuild test-without-building` | 同上（Wi‑Fi 或 `iproxy`） | `scripts/run_wda_xcodebuild.sh` |
+| 可选：工具链托管 session | Appium XCUITest（preinstalled WDA） | 同上（Wi‑Fi 或 `iproxy`） | `scripts/run_wda_preinstalled_appium.sh` |
+
+补充：通过 Xcode UI Test 启动 WDA 时，`WebDriverAgentRunner-Runner` 可能会被重新安装/更新，从而把 iPhone 里该 App 的 `Wireless Data` 重置回 Off。日常用 `devicectl`（启动已安装 Runner）或使用 `iproxy` 都能显著减少/绕开这个问题。
 
 ### 3. 运行 iOS 版 Phone Agent
 
@@ -138,14 +285,16 @@ python ios.py --wda-url http://<iphone-ip>:8100 --base-url http://localhost:8000
 
 ## 部署准备工作
 
-### 1. 安装依赖
+### 1. 安装依赖（Android / iOS 通用）
 
 ```bash
 pip install -r requirements.txt 
 pip install -e .
 ```
 
-### 2. 配置 ADB
+### 2. 连接设备（按平台）
+
+#### Android：配置 ADB
 
 确认 **USB 数据线具有数据传输功能**, 而不是仅有充电功能
 
@@ -160,7 +309,20 @@ adb devices
 # emulator-5554   device
 ```
 
-### 3. 启动模型服务
+#### iPhone（iOS）：确保 WDA 可达
+
+iOS 不使用 ADB；只要你的 WDA（WebDriverAgent）可访问即可（见上方 “iPhone 环境准备”）。
+
+你可以先用以下命令做一次连通性检查（`<WDA_URL>` 二选一）：
+
+- Wi‑Fi 直连：`http://<iphone-ip>:8100`
+- USB + `iproxy`：`http://127.0.0.1:8100`
+
+```bash
+python ios.py --wda-url <WDA_URL> --wda-status
+```
+
+### 3. 启动模型服务（Android / iOS 通用）
 
 你可以选择自行部署模型服务，或使用第三方模型服务商。
 
@@ -185,11 +347,17 @@ adb devices
 使用第三方服务的示例：
 
 ```bash
-# 使用智谱 BigModel
+# Android：使用智谱 BigModel
 python main.py --base-url https://open.bigmodel.cn/api/paas/v4 --model "autoglm-phone" --apikey "your-bigmodel-api-key" "打开美团搜索附近的火锅店"
 
-# 使用 ModelScope
+# iOS：使用智谱 BigModel（需要额外加 --wda-url）
+python ios.py --wda-url <WDA_URL> --base-url https://open.bigmodel.cn/api/paas/v4 --model "autoglm-phone" --apikey "your-bigmodel-api-key" "打开 Safari 搜索附近的火锅店"
+
+# Android：使用 ModelScope
 python main.py --base-url https://api-inference.modelscope.cn/v1 --model "ZhipuAI/AutoGLM-Phone-9B" --apikey "your-modelscope-api-key" "打开美团搜索附近的火锅店"
+
+# iOS：使用 ModelScope（需要额外加 --wda-url）
+python ios.py --wda-url <WDA_URL> --base-url https://api-inference.modelscope.cn/v1 --model "ZhipuAI/AutoGLM-Phone-9B" --apikey "your-modelscope-api-key" "打开 Safari 搜索附近的火锅店"
 ```
 
 #### 选项 B: 自行部署模型

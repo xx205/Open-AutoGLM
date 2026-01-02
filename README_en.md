@@ -74,23 +74,174 @@ iOS automation is driven by WebDriverAgent (WDA). You need macOS + Xcode to buil
 
 ### 1. Run WebDriverAgent on the Device
 
-1. Clone WebDriverAgent:
+#### 0. Background: How WDA / Xcode / the Runner fit together on iOS
+
+Unlike Android, iOS does not have a universal ADB-like interface. To automate “tap / swipe / type / screenshot” on an iPhone, the common foundation is Apple’s **XCUITest** (Xcode’s UI testing framework).
+
+WebDriverAgent (WDA) is best thought of as: an HTTP server that exposes XCUITest automation primitives. AutoGLM iOS uses it by sending HTTP requests to WDA, and WDA performs the actions on the device.
+
+The relationship can be simplified as:
+
+`AutoGLM (Mac)  --HTTP-->  WDA (iPhone)  --XCUITest-->  iOS UI`
+
+Key terms (the ones new users usually mix up):
+
+- **What is WDA**
+  - When WDA is running on the iPhone, it serves an HTTP API (default port `8100`; `/status` is the usual health check).
+  - Whether `http://...:8100/status` works is simply “is WDA running + can your machine reach it”.
+
+- **What does Xcode do here**
+  - Builds and signs WDA, then installs it onto the iPhone (iOS apps must be signed to run).
+  - Starts an XCUITest session, in which WDA’s server is launched and kept alive.
+
+- **What is the Runner (why you see `WebDriverAgentRunner-Runner` in Settings)**
+  - `WebDriverAgentRunner-Runner` is the **test runner app** installed by Xcode when you run a UI test. You’ll see it under iPhone Settings → Apps.
+  - It is not a standalone project target; the target you configure is `WebDriverAgentRunner` (signing + `PRODUCT_BUNDLE_IDENTIFIER`).
+  - When we say “preinstalled Runner”, we simply mean: `WebDriverAgentRunner-Runner` is already installed on the iPhone (usually after you successfully ran `Product > Test` once).
+
+- **What is the WDA URL (the value for `ios.py --wda-url`)**
+  - It is the network entry point from the machine running AutoGLM to the iPhone’s WDA port:
+    - **Wi‑Fi direct**: `http://<iphone-ip>:8100` (LAN access must be allowed, and the Runner app’s **Wireless Data** must NOT be Off)
+    - **USB forwarding**: run `iproxy 8100 8100`, then use `http://127.0.0.1:8100` (most reliable; bypasses router/LAN policies)
+
+You can think of the whole setup as two steps:
+
+1) Get WDA running on the iPhone (Runner is running and listening on port 8100)  
+2) Make it reachable from your machine (Wi‑Fi direct or `iproxy`)
+
+#### 1. Recommended End-to-End Workflow (Wi‑Fi direct + devicectl, no repeated xcodebuild)
+
+Goal: use Xcode only once for signing/install, then start the already-installed Runner via `devicectl` day-to-day (to reduce Runner reinstall/update that can reset per-app settings).
+
+##### 1.1 One-time Setup: Install the Runner (first time only)
+
+1) Clone WebDriverAgent:
 
 ```bash
 git clone https://github.com/appium/WebDriverAgent.git
 cd WebDriverAgent
 ```
 
-2. Open `WebDriverAgent.xcodeproj` in Xcode, configure Signing & Capabilities for `WebDriverAgentRunner`.
-3. Run it as a UI test: `Product > Test` (Cmd+U).
+2) Open `WebDriverAgent.xcodeproj` in Xcode, configure Signing & Capabilities, and set a stable Bundle Identifier (`PRODUCT_BUNDLE_IDENTIFIER`) for the `WebDriverAgentRunner` target (e.g. `YOUR_NAME.WebDriverAgentRunner`).
 
-If you enable “Show this iPhone when on Wi‑Fi” in Finder and make sure your Mac and iPhone are on the same WiFi network, you can run without a USB cable.
+Note: `WebDriverAgentRunner-Runner` you see in iPhone Settings is not a project target. It’s the auto-generated Runner app created/installed by Xcode when running UI tests (it usually shows up with a `-Runner` suffix).
 
-**Note:** We recommend running over Wi‑Fi (more stable and simpler). If you use USB, make sure the `:8100` port is reachable on this machine.
+3) Select the `WebDriverAgentRunner` scheme and your iPhone device, then run `Product > Test` (Cmd+U).
 
-When running for the first time, you may need to unlock the iPhone, trust the developer app under `Settings -> General -> VPN & Device Management`, and enable UI automation under `Settings -> Developer`.
+On the first run you may need to unlock the iPhone and trust the developer app under `Settings -> General -> VPN & Device Management`.
 
-Make sure `http://<iphone-ip>:8100/status` is reachable from the machine running AutoGLM.
+You only need to get it working once: `WebDriverAgentRunner-Runner` shows up on the iPhone, and WDA can serve `/status`.
+
+Optional: Install/Update the Runner once (more controlled; then only start/stop via devicectl)
+
+If you want to separate “install/update” from day-to-day “start/stop”, or if `devicectl` launch exits immediately on iOS 17+ / 18, follow `docs/recipes/run_wda_preinstalled_devicectl.md`. Here is the minimal summary:
+
+1) Locate the Runner `.app` built by Xcode (usually under DerivedData):
+
+```bash
+ls ~/Library/Developer/Xcode/DerivedData/WebDriverAgent-*/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app
+```
+
+2) (Optional) prepare a “devicectl-friendly” Runner (remove `Frameworks/XC*.framework` and re-sign):
+
+```bash
+bash scripts/prepare_wda_runner_for_devicectl.sh \
+  --app ~/Library/Developer/Xcode/DerivedData/WebDriverAgent-*/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app \
+  --out /tmp/WDA-Prepared
+```
+
+3) Install to the device (do once; no repeated installs afterward):
+
+```bash
+xcrun devicectl device install app --device <UDID> /tmp/WDA-Prepared/WebDriverAgentRunner-Runner.app
+```
+
+You can get `<UDID>` via `xcrun devicectl list devices` (see 1.3 below).
+
+Installing will replace/update the app. After that, do 1.2 and enable `Wireless Data` once.
+
+##### 1.2 One-time Setup: Enable Wi‑Fi Access (otherwise `<iphone-ip>:8100` may time out)
+
+If you want Wi‑Fi direct access (`http://<iphone-ip>:8100`), make sure on the iPhone:
+
+`Settings -> Apps -> WebDriverAgentRunner-Runner -> Wireless Data`
+
+is set to **WLAN** or **WLAN & Cellular Data** (not **Off**).
+
+> Common pitfall: when it’s Off, `http://127.0.0.1:8100/status` works on-device, but `http://<iphone-ip>:8100/status` times out (even from the iPhone itself).
+> If you run WDA via Wi‑Fi UI testing, having it Off is also a common cause of device logs like `Exiting due to IDE disconnection.`.
+
+##### 1.3 Day-to-day: Start the Preinstalled Runner via devicectl (no xcodebuild)
+
+1) Get the device UDID:
+
+```bash
+xcrun devicectl list devices
+```
+
+2) Find the WDA `*.xctrunner` bundle id (the one that ends with `.xctrunner`):
+
+```bash
+xcrun devicectl device info apps --device <UDID> --include-all-apps | grep -i WebDriverAgent
+```
+
+3) Start WDA (Wi‑Fi direct):
+
+```bash
+bash scripts/run_wda_preinstalled_devicectl.sh start \
+  --device <UDID> \
+  --bundle-id <WDA_XCTRUNNER_BUNDLE_ID> \
+  --wda-url http://<iphone-ip>:8100
+```
+
+You can find `<iphone-ip>` in iPhone Settings → Wi‑Fi → current network details.
+
+4) Verify:
+
+```bash
+python ios.py --wda-url http://<iphone-ip>:8100 --wda-status
+```
+
+To stop:
+
+```bash
+bash scripts/run_wda_preinstalled_devicectl.sh stop --device <UDID> --bundle-id <WDA_XCTRUNNER_BUNDLE_ID>
+```
+
+#### 2. Other Workflows (All Options)
+
+If you hit these situations, pick a different workflow:
+
+- You haven’t installed `WebDriverAgentRunner-Runner` yet / signing issues → run Xcode `Product > Test` once
+- LAN access is unreliable/restricted → use USB + `iproxy` and always talk to `http://127.0.0.1:8100`
+- Still using UI tests but want faster restarts → `build-for-testing` + `test-without-building`
+- Want a full toolchain managing the XCTest session → Appium (optional)
+
+Decision tree:
+
+- Prefer Wi‑Fi direct and want to avoid running `xcodebuild ... test` repeatedly
+  - Prereq: `WebDriverAgentRunner-Runner` is already installed on the iPhone
+  - Pick: `devicectl --no-activate` (recommended) → `docs/recipes/run_wda_preinstalled_devicectl.md`
+- First-time install / signing troubleshooting
+  - Pick: Xcode `Product > Test` (UI test)
+- Most stable fallback (no LAN dependency)
+  - Pick: USB + `iproxy` → `docs/recipes/iproxy_from_source.md`
+- Faster restarts (still UI test)
+  - Pick: `xcodebuild test-without-building` → `docs/recipes/run_wda_xcodebuild.md`
+- Optional: managed session
+  - Pick: Appium “preinstalled WDA” → `docs/recipes/run_wda_preinstalled_appium.md`
+
+Quick matrix:
+
+| Scenario | Start WDA | Talk to WDA | Entry |
+| --- | --- | --- | --- |
+| **Preferred**: Wi‑Fi + no repeated `xcodebuild` | `devicectl --no-activate` (Runner app already installed) | `http://<iphone-ip>:8100` | `scripts/run_wda_preinstalled_devicectl.sh` |
+| First-time install / signing | Xcode `Product > Test` (UI test) | Wi‑Fi: `http://<iphone-ip>:8100` | “Install the Runner” above |
+| Most stable fallback | Xcode / `devicectl` | `iproxy` → `http://127.0.0.1:8100` | `docs/recipes/iproxy_from_source.md` |
+| Faster restarts (still UI test) | `xcodebuild test-without-building` | Wi‑Fi or `iproxy` | `scripts/run_wda_xcodebuild.sh` |
+| Optional: managed session | Appium XCUITest (preinstalled WDA) | Wi‑Fi or `iproxy` | `scripts/run_wda_preinstalled_appium.sh` |
+
+Note: when you run WDA as a UI test from Xcode, `WebDriverAgentRunner-Runner` may be reinstalled/updated and `Wireless Data` can reset to **Off**. Using `devicectl` (day-to-day) or using `iproxy` helps avoid this.
 
 ### 2. Run the iOS Agent
 
@@ -109,14 +260,16 @@ Note: The iOS path only requires a reachable WDA endpoint (no `libimobiledevice`
 
 ## Deployment Preparation
 
-### 1. Install Dependencies
+### 1. Install Dependencies (Android / iOS)
 
 ```bash
 pip install -r requirements.txt 
 pip install -e .
 ```
 
-### 2. Configure ADB
+### 2. Device Connectivity (Platform-Specific)
+
+#### Android: Configure ADB
 
 Make sure your **USB cable supports data transfer**, not just charging.
 
@@ -131,7 +284,20 @@ adb devices
 # emulator-5554   device
 ```
 
-### 3. Start Model Service
+#### iPhone (iOS): Ensure WDA Is Reachable
+
+iOS does not use ADB. You only need a reachable WebDriverAgent (WDA) endpoint (see “iPhone (iOS) Setup” above).
+
+Quick connectivity check (`<WDA_URL>` choose one):
+
+- Wi‑Fi: `http://<iphone-ip>:8100`
+- USB + `iproxy`: `http://127.0.0.1:8100`
+
+```bash
+python ios.py --wda-url <WDA_URL> --wda-status
+```
+
+### 3. Start Model Service (Android / iOS)
 
 You can choose to deploy the model service yourself or use a third-party model service provider.
 
@@ -163,14 +329,23 @@ If you don't want to deploy the model yourself, you can use the following third-
 Example usage with third-party services:
 
 ```bash
-# Using z.ai
+# Android: Using z.ai
 python main.py --base-url https://api.z.ai/api/paas/v4 --model "autoglm-phone-multilingual" --apikey "your-z-ai-api-key" "Open Chrome browser"
 
-# Using Novita AI
+# iOS: Using z.ai (add --wda-url)
+python ios.py --wda-url <WDA_URL> --base-url https://api.z.ai/api/paas/v4 --model "autoglm-phone-multilingual" --apikey "your-z-ai-api-key" "Open Safari"
+
+# Android: Using Novita AI
 python main.py --base-url https://api.novita.ai/openai --model "zai-org/autoglm-phone-9b-multilingual" --apikey "your-novita-api-key" "Open Chrome browser"
 
-# Using Parasail
+# iOS: Using Novita AI (add --wda-url)
+python ios.py --wda-url <WDA_URL> --base-url https://api.novita.ai/openai --model "zai-org/autoglm-phone-9b-multilingual" --apikey "your-novita-api-key" "Open Safari"
+
+# Android: Using Parasail
 python main.py --base-url https://api.parasail.io/v1 --model "parasail-auto-glm-9b-multilingual" --apikey "your-parasail-api-key" "Open Chrome browser"
+
+# iOS: Using Parasail (add --wda-url)
+python ios.py --wda-url <WDA_URL> --base-url https://api.parasail.io/v1 --model "parasail-auto-glm-9b-multilingual" --apikey "your-parasail-api-key" "Open Safari"
 ```
 
 #### Option B: Deploy Model Yourself

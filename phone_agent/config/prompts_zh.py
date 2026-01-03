@@ -5,7 +5,8 @@ from datetime import datetime
 today = datetime.today()
 weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 weekday = weekday_names[today.weekday()]
-formatted_date = today.strftime("%Y年%m月%d日") + " " + weekday
+# Avoid non-ASCII strftime format strings (can raise UnicodeEncodeError on some Windows locales).
+formatted_date = f"{today.year}年{today.month:02d}月{today.day:02d}日 {weekday}"
 
 SYSTEM_PROMPT = (
     "今天的日期是: "

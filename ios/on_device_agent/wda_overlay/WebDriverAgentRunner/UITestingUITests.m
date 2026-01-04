@@ -1,0 +1,2171 @@
+/**
+ * Copyright (c) 2015-present, Facebook, Inc.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+#import <XCTest/XCTest.h>
+
+#import <WebDriverAgentLib/FBDebugLogDelegateDecorator.h>
+#import <WebDriverAgentLib/FBConfiguration.h>
+#import <WebDriverAgentLib/FBFailureProofTestCase.h>
+#import <WebDriverAgentLib/FBWebServer.h>
+#import <WebDriverAgentLib/XCTestCase.h>
+
+#import <WebDriverAgentLib/FBCommandHandler.h>
+#import <WebDriverAgentLib/FBHTTPStatusCodes.h>
+#import <WebDriverAgentLib/FBLogger.h>
+#import <WebDriverAgentLib/FBResponsePayload.h>
+#import <WebDriverAgentLib/FBRoute.h>
+#import <WebDriverAgentLib/FBRouteRequest.h>
+#import <WebDriverAgentLib/XCUIApplication+FBHelpers.h>
+#import <WebDriverAgentLib/XCUIElement+FBTyping.h>
+
+#import "RouteResponse.h"
+
+static NSString *const kAutoGLMTaskKey = @"AUTOGLM_TASK";
+static NSString *const kAutoGLMBaseURLKey = @"AUTOGLM_BASE_URL";
+static NSString *const kAutoGLMModelKey = @"AUTOGLM_MODEL";
+static NSString *const kAutoGLMApiKeyKey = @"AUTOGLM_API_KEY";
+static NSString *const kAutoGLMMaxStepsKey = @"AUTOGLM_MAX_STEPS";
+static NSString *const kAutoGLMTimeoutSecondsKey = @"AUTOGLM_TIMEOUT_SECONDS";
+static NSString *const kAutoGLMStepDelaySecondsKey = @"AUTOGLM_STEP_DELAY_SECONDS";
+static NSString *const kAutoGLMInsecureSkipTLSVerifyKey = @"AUTOGLM_INSECURE_SKIP_TLS_VERIFY";
+static NSString *const kAutoGLMRememberApiKeyKey = @"AUTOGLM_REMEMBER_API_KEY";
+static NSString *const kAutoGLMDebugLogRawAssistantKey = @"AUTOGLM_DEBUG_LOG_RAW_ASSISTANT";
+
+static BOOL AutoGLMParseBool(id value, BOOL defaultValue)
+{
+  if ([value isKindOfClass:NSNumber.class]) {
+    return [((NSNumber *)value) boolValue];
+  }
+  if (![value isKindOfClass:NSString.class]) {
+    return defaultValue;
+  }
+  NSString *lower = [((NSString *)value) lowercaseString];
+  if ([lower isEqualToString:@"1"] || [lower isEqualToString:@"true"] || [lower isEqualToString:@"yes"] || [lower isEqualToString:@"y"]) {
+    return YES;
+  }
+  if ([lower isEqualToString:@"0"] || [lower isEqualToString:@"false"] || [lower isEqualToString:@"no"] || [lower isEqualToString:@"n"]) {
+    return NO;
+  }
+  return defaultValue;
+}
+
+static NSInteger AutoGLMParseInt(id value, NSInteger defaultValue)
+{
+  if ([value isKindOfClass:NSNumber.class]) {
+    NSInteger v = [((NSNumber *)value) integerValue];
+    return v > 0 ? v : defaultValue;
+  }
+  if (![value isKindOfClass:NSString.class]) {
+    return defaultValue;
+  }
+  NSInteger v = [((NSString *)value) integerValue];
+  return v > 0 ? v : defaultValue;
+}
+
+static double AutoGLMParseDouble(id value, double defaultValue)
+{
+  if ([value isKindOfClass:NSNumber.class]) {
+    double v = [((NSNumber *)value) doubleValue];
+    return v > 0 ? v : defaultValue;
+  }
+  if (![value isKindOfClass:NSString.class]) {
+    return defaultValue;
+  }
+  double v = [((NSString *)value) doubleValue];
+  return v > 0 ? v : defaultValue;
+}
+
+static double AutoGLMClamp01(double v)
+{
+  if (v < 0.0) {
+    return 0.0;
+  }
+  if (v > 1.0) {
+    return 1.0;
+  }
+  return v;
+}
+
+static NSString *AutoGLMStringOrEmpty(id value)
+{
+  return [value isKindOfClass:NSString.class] ? (NSString *)value : @"";
+}
+
+static NSString *AutoGLMTrim(NSString *s)
+{
+  return [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+}
+
+static NSString *AutoGLMNormalizeApiKey(NSString *raw)
+{
+  NSString *s = AutoGLMTrim(raw ?: @"");
+  if (s.length == 0) {
+    return @"";
+  }
+
+  NSString *lower = [s lowercaseString];
+  if ([lower hasPrefix:@"authorization:"]) {
+    s = AutoGLMTrim([s substringFromIndex:@"authorization:".length]);
+  }
+  lower = [s lowercaseString];
+  if ([lower hasPrefix:@"bearer"]) {
+    s = AutoGLMTrim([s substringFromIndex:@"bearer".length]);
+  }
+  return s;
+}
+
+static NSString *AutoGLMJSONStringFromObject(id obj)
+{
+  if (obj == nil) {
+    return @"";
+  }
+  if (![NSJSONSerialization isValidJSONObject:obj]) {
+    return [obj description] ?: @"";
+  }
+  NSError *err = nil;
+  NSData *data = [NSJSONSerialization dataWithJSONObject:obj options:0 error:&err];
+  if (data == nil) {
+    return [obj description] ?: @"";
+  }
+  NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+  return s ?: ([obj description] ?: @"");
+}
+
+static NSString *AutoGLMTruncate(NSString *s, NSUInteger maxChars)
+{
+  if (s.length <= maxChars) {
+    return s;
+  }
+  return [[s substringToIndex:maxChars] stringByAppendingString:@"..."];
+}
+
+static NSString *AutoGLMCollapseSpaces(NSString *s)
+{
+  NSString *out = s ?: @"";
+  while ([out containsString:@"  "]) {
+    out = [out stringByReplacingOccurrencesOfString:@"  " withString:@" "];
+  }
+  return out;
+}
+
+static NSString *AutoGLMNormalizeActionName(NSString *raw)
+{
+  NSString *s = AutoGLMTrim(raw ?: @"");
+  if (s.length == 0) {
+    return @"";
+  }
+  s = [[s lowercaseString] stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+  s = [s stringByReplacingOccurrencesOfString:@"-" withString:@" "];
+  s = AutoGLMCollapseSpaces(s);
+
+  if ([s isEqualToString:@"double tap"] || [s isEqualToString:@"doubletap"]) {
+    return @"double_tap";
+  }
+  if ([s isEqualToString:@"long press"] || [s isEqualToString:@"longpress"]) {
+    return @"long_press";
+  }
+  if ([s isEqualToString:@"type name"] || [s isEqualToString:@"type_name"]) {
+    return @"type";
+  }
+  if ([s isEqualToString:@"call api"] || [s isEqualToString:@"call_api"]) {
+    return @"call_api";
+  }
+  if ([s isEqualToString:@"take over"] || [s isEqualToString:@"take_over"] || [s isEqualToString:@"takeover"]) {
+    return @"take_over";
+  }
+  if ([s isEqualToString:@"finish"]) {
+    return @"finish";
+  }
+  if ([s isEqualToString:@"launch"]) {
+    return @"launch";
+  }
+  if ([s isEqualToString:@"tap"]) {
+    return @"tap";
+  }
+  if ([s isEqualToString:@"type"]) {
+    return @"type";
+  }
+  if ([s isEqualToString:@"swipe"]) {
+    return @"swipe";
+  }
+  if ([s isEqualToString:@"back"]) {
+    return @"back";
+  }
+  if ([s isEqualToString:@"home"]) {
+    return @"home";
+  }
+  if ([s isEqualToString:@"wait"]) {
+    return @"wait";
+  }
+  if ([s isEqualToString:@"note"]) {
+    return @"note";
+  }
+  if ([s isEqualToString:@"interact"]) {
+    return @"interact";
+  }
+
+  return s;
+}
+
+static NSString *AutoGLMNowString(void)
+{
+  NSDateFormatter *f = [NSDateFormatter new];
+  f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+  f.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+  return [f stringFromDate:[NSDate date]];
+}
+
+static NSString *AutoGLMFormattedDateZH(void)
+{
+  NSDate *date = [NSDate date];
+  NSDateFormatter *f = [NSDateFormatter new];
+  f.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+  f.dateFormat = @"yyyy年MM月dd日";
+  NSString *day = [f stringFromDate:date] ?: @"";
+
+  NSArray<NSString *> *weekdays = @[@"星期日", @"星期一", @"星期二", @"星期三", @"星期四", @"星期五", @"星期六"];
+  NSCalendar *cal = [NSCalendar currentCalendar];
+  NSInteger idx = [[cal components:NSCalendarUnitWeekday fromDate:date] weekday];
+  NSString *weekday = (idx >= 1 && idx <= (NSInteger)weekdays.count) ? weekdays[idx - 1] : @"";
+
+  if (weekday.length == 0) {
+    return day;
+  }
+  return [NSString stringWithFormat:@"%@ %@", day, weekday];
+}
+
+static NSDictionary<NSString *, NSString *> *AutoGLMAppBundleIdMap(void)
+{
+  static NSDictionary<NSString *, NSString *> *map = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    map = @{
+      @"115": @"com.115.personal",
+      @"58同城": @"com.taofang.iphone",
+      @"App Store": @"com.apple.AppStore",
+      @"Apple Store": @"com.apple.store.Jolly",
+      @"CSDN": @"net.csdn.CsdnPlus",
+      @"Dcard": @"com.dcard.app.Dcard",
+      @"FaceTime": @"com.apple.facetime",
+      @"Facebook": @"com.facebook.Facebook",
+      @"Facetime": @"com.apple.facetime",
+      @"Firefox": @"org.mozilla.ios.Firefox",
+      @"Gmail": @"com.google.Gmail",
+      @"Google Chrome": @"com.google.chrome.ios",
+      @"Instagram": @"com.burbn.instagram",
+      @"Keynote": @"com.apple.Keynote",
+      @"Keynote 讲演": @"com.apple.Keynote",
+      @"Line": @"jp.naver.line",
+      @"Linkedin": @"com.linkedin.LinkedIn",
+      @"Luckin Coffee": @"com.bjlc.luckycoffee",
+      @"Messenger": @"com.facebook.Messenger",
+      @"Netflix": @"com.netflix.Netflix",
+      @"QQ": @"com.tencent.mqq",
+      @"QQ 音乐": @"com.tencent.QQMusic",
+      @"QQ浏览器": @"com.tencent.mttlite",
+      @"QQ邮箱": @"com.tencent.qqmail",
+      @"QQ阅读": @"com.tencent.qqreaderiphone",
+      @"QQ音乐": @"com.tencent.QQMusic",
+      @"Safari": @"com.apple.mobilesafari",
+      @"Spotify": @"com.spotify.client",
+      @"Starbucks": @"com.starbucks.mystarbucks",
+      @"TIM": @"com.tencent.tim",
+      @"TestFlight": @"com.apple.TestFlight",
+      @"Tiktok": @"com.zhiliaoapp.musically",
+      @"Twitter": @"com.atebits.Tweetie2",
+      @"UC浏览器": @"com.ucweb.iphone.lowversion",
+      @"Watch": @"com.apple.Bridge",
+      @"WhatsApp": @"net.whatsapp.WhatsApp",
+      @"Xmind": @"net.xmind.brownieapp",
+      @"YY": @"yyvoice",
+      @"Youtube": @"com.google.ios.youtube",
+      @"iMovie": @"com.apple.iMovie",
+      @"一淘": @"com.taobao.etaocoupon",
+      @"中国银行": @"com.boc.BOCMBCI",
+      @"书旗小说": @"com.shuqicenter.reader",
+      @"云闪付": @"com.unionpay.chsp",
+      @"京东": @"com.360buy.jdmobile",
+      @"京东读书": @"com.jd.reader",
+      @"亿通行": @"com.ruubypay.yitongxing",
+      @"什么值得买": @"com.smzdm.client.ios",
+      @"今日头条": @"com.ss.iphone.article.News",
+      @"企业微信": @"com.tencent.ww",
+      @"优酷": @"com.youku.YouKu",
+      @"便利蜂": @"com.bianlifeng.customer.ios",
+      @"信息": @"com.apple.MobileSMS",
+      @"健康": @"com.apple.Health",
+      @"全民k歌": @"com.tencent.QQKSong",
+      @"印象笔记": @"com.yinxiang.iPhone",
+      @"去哪儿旅行": @"com.qunar.iphoneclient8",
+      @"口碑": @"com.taobao.kbmeishi",
+      @"名片全能王": @"com.intsig.camcard.lite",
+      @"哔哩哔哩": @"tv.danmaku.bilianime",
+      @"唯品会": @"com.vipshop.iphone",
+      @"唱吧": @"com.changba.ktv",
+      @"喜马拉雅": @"com.gemd.iting",
+      @"图书": @"com.apple.iBooks",
+      @"土豆视频": @"com.tudou.tudouiphone",
+      @"地图": @"com.apple.Maps",
+      @"墨客": @"com.moke.moke.iphone",
+      @"备忘录": @"com.apple.mobilenotes",
+      @"多抓鱼": @"com.duozhuyu.dejavu",
+      @"多点": @"com.dmall.dmall",
+      @"大众点评": @"com.dianping.dpscope",
+      @"大都会Metro": @"com.DDH.SHSubway",
+      @"天气": @"com.apple.weather",
+      @"天猫": @"com.taobao.tmall",
+      @"家庭": @"com.apple.Home",
+      @"小红书": @"com.xingin.discover",
+      @"小鹅拼拼": @"com.tencent.dwdcoco",
+      @"库乐队": @"com.apple.mobilegarageband",
+      @"得到": @"com.luojilab.LuoJiFM-IOS",
+      @"得物": @"com.siwuai.duapp",
+      @"微信": @"com.tencent.xin",
+      @"微信听书": @"com.tencent.wehear",
+      @"微信读书": @"com.tencent.weread",
+      @"微博": @"com.sina.weibo",
+      @"微博国际": @"com.weibo.international",
+      @"微博极速版": @"com.sina.weibolite",
+      @"微视": @"com.tencent.microvision",
+      @"快手": @"com.jiangjia.gif",
+      @"快手极速版": @"com.kuaishou.nebula",
+      @"快捷指令": @"com.apple.shortcuts",
+      @"抖音": @"com.ss.iphone.ugc.Aweme",
+      @"抖音极速版": @"com.ss.iphone.ugc.aweme.lite",
+      @"抖音火山版": @"com.ss.iphone.ugc.Live",
+      @"拼多多": @"com.xunmeng.pinduoduo",
+      @"提醒事项": @"com.apple.reminders",
+      @"搜狐新闻": @"com.sohu.newspaper",
+      @"搜狐视频": @"com.sohu.iPhoneVideo",
+      @"搜狗浏览器": @"com.sogou.SogouExplorerMobile",
+      @"携程": @"ctrip.com",
+      @"播客": @"com.apple.podcasts",
+      @"支付宝": @"com.alipay.iphoneclient",
+      @"文件": @"com.apple.DocumentsApp",
+      @"斗鱼": @"tv.douyu.live",
+      @"新闻": @"com.apple.news",
+      @"日历": @"com.apple.mobilecal",
+      @"时钟": @"com.apple.mobiletimer",
+      @"有道云笔记": @"com.youdao.note.YoudaoNoteMac",
+      @"查找": @"com.apple.findmy",
+      @"欧陆词典": @"eusoft.eudic.pro",
+      @"比心": @"com.yitan.bixin",
+      @"淘宝": @"com.taobao.taobao4iphone",
+      @"淘票票": @"com.taobao.movie.MoviePhoneClient",
+      @"照片": @"com.apple.mobileslideshow",
+      @"爱奇艺视频": @"com.qiyi.iphone",
+      @"电话": @"com.apple.mobilephone",
+      @"番茄小说": @"com.dragon.read",
+      @"百度": @"com.baidu.BaiduMobile",
+      @"百度地图": @"com.baidu.map",
+      @"百度文库": @"com.baidu.Wenku",
+      @"百度网盘": @"com.baidu.netdisk",
+      @"百度翻译": @"com.baidu.translate",
+      @"百度视频": @"com.baidu.videoiphone",
+      @"百度贴吧": @"com.baidu.tieba",
+      @"百度输入法": @"com.baidu.inputMethod",
+      @"百度阅读": @"com.baidu.yuedu",
+      @"皮皮虾": @"com.bd.iphone.super",
+      @"相机": @"com.apple.camera",
+      @"知乎": @"com.zhihu.ios",
+      @"绿洲": @"com.sina.oasis",
+      @"网易严选": @"com.netease.yanxuan",
+      @"网易云音乐": @"com.netease.cloudmusic",
+      @"网易公开课": @"com.netease.videoHD",
+      @"网易新闻": @"com.netease.news",
+      @"网易有道词典": @"youdaoPro",
+      @"网易邮箱大师": @"com.netease.macmail",
+      @"美团": @"com.meituan.imeituan",
+      @"美团买菜": @"com.baobaoaichi.imaicai",
+      @"美团众包": @"com.meituan.banma.crowdsource",
+      @"美团优选": @"com.meituan.iyouxuan",
+      @"美团优选团长": @"com.meituan.igrocery.gh",
+      @"美团外卖": @"com.meituan.itakeaway",
+      @"美团开店宝": @"com.meituan.imerchantbiz",
+      @"美团拍店": @"com.meituan.pai",
+      @"美团秀秀": @"com.meitu.mtxx",
+      @"美团骑手": @"com.meituan.banma.homebrew",
+      @"翻译": @"com.apple.Translate",
+      @"股市": @"com.apple.stocks",
+      @"腾讯体育": @"com.tencent.sportskbs",
+      @"腾讯动漫": @"com.tencent.ied.app.comic",
+      @"腾讯地图": @"com.tencent.sosomap",
+      @"腾讯微云": @"com.tencent.weiyun",
+      @"腾讯文档": @"com.tencent.txdocs",
+      @"腾讯新闻": @"com.tencent.info",
+      @"腾讯翻译君": @"com.tencent.qqtranslator",
+      @"腾讯视频": @"com.tencent.live4iphone",
+      @"腾讯课堂": @"com.tencent.edu",
+      @"自如": @"com.ziroom.ZiroomProject",
+      @"芒果TV": @"com.hunantv.imgotv",
+      @"苏宁易购": @"SuningEMall",
+      @"菜鸟裹裹": @"com.cainiao.cnwireless",
+      @"虎牙": @"com.yy.kiwi",
+      @"虾米音乐": @"com.xiami.spark",
+      @"西瓜视频": @"com.ss.iphone.article.Video",
+      @"视频": @"com.apple.tv",
+      @"计算器": @"com.apple.calculator",
+      @"设置": @"com.apple.Preferences",
+      @"语音备忘录": @"com.apple.VoiceMemos",
+      @"豆瓣": @"com.douban.frodo",
+      @"起点读书": @"m.qidian.QDReaderAppStore",
+      @"转转": @"com.wuba.zhuanzhuan",
+      @"通讯录": @"com.apple.MobileAddressBook",
+      @"邮件": @"com.apple.mobilemail",
+      @"酷狗音乐": @"com.kugou.kugou1002",
+      @"钉钉": @"com.laiwang.DingTalk",
+      @"钱包": @"com.apple.Passbook",
+      @"闲鱼": @"com.taobao.fleamarket",
+      @"闹钟": @"com.apple.mobiletimer",
+      @"陌陌": @"com.wemomo.momoappdemo1",
+      @"音乐": @"com.apple.Music",
+      @"飞书": @"com.bytedance.ee.lark",
+      @"飞猪": @"com.taobao.travel",
+      @"饿了么": @"me.ele.ios.eleme",
+      @"高德地图": @"com.autonavi.amap",
+
+      // Common aliases
+      @"xhs": @"com.xingin.discover",
+      @"xiaohongshu": @"com.xingin.discover",
+      @"feishu": @"com.bytedance.ee.lark",
+      @"lark": @"com.bytedance.ee.lark",
+    };
+  });
+  return map;
+}
+
+static NSDictionary<NSString *, NSString *> *AutoGLMAppBundleIdMapLower(void)
+{
+  static NSDictionary<NSString *, NSString *> *map = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    NSDictionary<NSString *, NSString *> *base = AutoGLMAppBundleIdMap();
+    NSMutableDictionary<NSString *, NSString *> *m = [NSMutableDictionary dictionaryWithCapacity:base.count];
+    for (NSString *key in base) {
+      NSString *value = base[key];
+      if (![key isKindOfClass:NSString.class] || ![value isKindOfClass:NSString.class]) {
+        continue;
+      }
+      m[[key lowercaseString]] = value;
+    }
+    map = [m copy];
+  });
+  return map;
+}
+
+static NSString *AutoGLMBundleIdForAppName(NSString *appName)
+{
+  NSString *name = AutoGLMTrim(appName ?: @"");
+  if (name.length == 0) {
+    return nil;
+  }
+  NSString *bundleId = AutoGLMAppBundleIdMap()[name];
+  if (bundleId.length > 0) {
+    return bundleId;
+  }
+  bundleId = AutoGLMAppBundleIdMapLower()[[name lowercaseString]];
+  if (bundleId.length > 0) {
+    return bundleId;
+  }
+  return nil;
+}
+
+static NSDictionary<NSString *, NSString *> *AutoGLMBundleIdToNameMap(void)
+{
+  static NSDictionary<NSString *, NSString *> *map = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    NSDictionary<NSString *, NSString *> *forward = AutoGLMAppBundleIdMap();
+    NSMutableDictionary<NSString *, NSString *> *m = [NSMutableDictionary dictionaryWithCapacity:forward.count];
+    for (NSString *name in forward) {
+      NSString *bundleId = forward[name];
+      if (![name isKindOfClass:NSString.class] || ![bundleId isKindOfClass:NSString.class]) {
+        continue;
+      }
+      // Prefer the first name we see for a given bundle id.
+      if (m[bundleId] == nil) {
+        m[bundleId] = name;
+      }
+    }
+    map = [m copy];
+  });
+  return map;
+}
+
+static NSString *AutoGLMAppNameForBundleId(NSString *bundleId)
+{
+  NSString *bid = AutoGLMTrim(bundleId ?: @"");
+  if (bid.length == 0) {
+    return nil;
+  }
+  NSString *name = AutoGLMBundleIdToNameMap()[bid];
+  return name.length > 0 ? name : nil;
+}
+
+static BOOL AutoGLMWaitForActiveBundleId(NSString *bundleId, NSTimeInterval timeoutSeconds)
+{
+  NSString *targetId = AutoGLMTrim(bundleId ?: @"");
+  if (targetId.length == 0) {
+    return NO;
+  }
+
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:MAX(0.0, timeoutSeconds)];
+  XCUIApplication *target = [[XCUIApplication alloc] initWithBundleIdentifier:targetId];
+  while ([deadline timeIntervalSinceNow] > 0) {
+    XCUIApplication *active = XCUIApplication.fb_activeApplication;
+    if ([active fb_isSameAppAs:target]) {
+      return YES;
+    }
+    [NSThread sleepForTimeInterval:0.2];
+  }
+  return NO;
+}
+
+@interface AutoGLMTextPayload : NSObject <FBResponsePayload>
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic, copy) NSString *contentType;
+@property (nonatomic, assign) NSInteger statusCode;
+@end
+
+@implementation AutoGLMTextPayload
+
+- (instancetype)initWithText:(NSString *)text contentType:(NSString *)contentType statusCode:(NSInteger)statusCode
+{
+  self = [super init];
+  if (self) {
+    _text = [text copy] ?: @"";
+    _contentType = [contentType copy] ?: @"text/plain;charset=UTF-8";
+    _statusCode = statusCode;
+  }
+  return self;
+}
+
+- (void)dispatchWithResponse:(RouteResponse *)response
+{
+  [response setHeader:@"Content-Type" value:self.contentType];
+  [response setStatusCode:self.statusCode];
+  [response respondWithString:self.text encoding:NSUTF8StringEncoding];
+}
+
+@end
+
+typedef void (^AutoGLMLogBlock)(NSString *line);
+typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
+
+@interface AutoGLMOnDeviceAgent : NSObject <NSURLSessionDelegate>
+@property (atomic, assign) BOOL stopRequested;
+@property (nonatomic, copy) NSDictionary *config;
+@property (nonatomic, copy) AutoGLMLogBlock log;
+@property (nonatomic, copy) AutoGLMFinishBlock finish;
+@property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *context;
+@property (nonatomic, copy) NSArray<NSDictionary *> *planChecklist;
+@end
+
+@implementation AutoGLMOnDeviceAgent
+
+- (instancetype)initWithConfig:(NSDictionary *)config log:(AutoGLMLogBlock)log finish:(AutoGLMFinishBlock)finish
+{
+  self = [super init];
+  if (!self) {
+    return nil;
+  }
+  _config = [config copy] ?: @{};
+  _log = [log copy];
+  _finish = [finish copy];
+  _stopRequested = NO;
+  _planChecklist = @[];
+
+  NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+  cfg.timeoutIntervalForRequest = AutoGLMParseDouble(config[kAutoGLMTimeoutSecondsKey], 90.0);
+  cfg.timeoutIntervalForResource = AutoGLMParseDouble(config[kAutoGLMTimeoutSecondsKey], 90.0);
+  _session = [NSURLSession sessionWithConfiguration:cfg delegate:self delegateQueue:nil];
+  _context = [NSMutableArray array];
+
+  return self;
+}
+
+- (void)emit:(NSString *)line
+{
+  if (self.log) {
+    self.log([NSString stringWithFormat:@"%@ %@", AutoGLMNowString(), line ?: @""]);
+  }
+}
+
+- (NSString *)buildSystemPrompt
+{
+  NSString *date = AutoGLMFormattedDateZH();
+
+	  return [NSString stringWithFormat:
+	    @"今天的日期是: %@\n"
+	    @"你是一个智能体分析专家，可以根据操作历史和当前状态图执行一系列操作来完成任务。\n"
+	    @"注意：本项目使用 JSON action。\n"
+	    @"你必须输出且只能输出 1 个合法的 JSON 对象。\n"
+	    @"要求：该 JSON 必须包含键 \"think\"，用于填写你为什么选择这个操作的简短推理说明；以及键 \"action\"，用于填写本次执行的具体操作指令。\n"
+	    @"其中：\"action\" 必须是字符串（例如 \"Launch\" / \"Tap\" / \"Type\" / ...），不要把 \"action\" 输出为嵌套对象。\n"
+	    @"\n"
+	    @"你必须维护一个 checklist 计划（字段 \"plan\"），用于长期任务的分步执行与自我校验。\n"
+	    @"- 第 0 步：在 JSON 中包含 \"plan\"，它是一个数组，每个元素是一个对象：{\"text\": \"...\", \"done\": true/false}。\n"
+	    @"- 后续每一步：继续在 JSON 中包含 \"plan\"，并根据当前进度更新每个条目的 done 状态（必要时可以增删条目，但保持条目数量精简）。\n"
+	    @"\n"
+	    @"操作指令 action 的取值及其作用如下：\n"
+    @"- {\"action\":\"Launch\",\"app\":\"xxx\"}\n"
+    @"    Launch是启动目标app的操作，这比通过主屏幕导航更快。此操作完成后，您将自动收到结果状态的截图。\n"
+    @"- {\"action\":\"Tap\",\"element\":[x,y]}\n"
+    @"    Tap是点击操作，点击屏幕上的特定点。可用此操作点击按钮、选择项目、从主屏幕打开应用程序，或与任何可点击的用户界面元素进行交互。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。\n"
+    @"- {\"action\":\"Tap\",\"element\":[x,y],\"message\":\"重要操作\"}\n"
+    @"    基本功能同Tap，点击涉及财产、支付、隐私等敏感按钮时触发。\n"
+    @"- {\"action\":\"Type\",\"text\":\"xxx\"}\n"
+    @"    Type是输入操作，在当前聚焦的输入框中输入文本。使用此操作前，请确保输入框已被聚焦（先点击它）。输入的文本将像使用键盘输入一样输入。重要提示：手机可能正在使用 ADB 键盘，该键盘不会像普通键盘那样占用屏幕空间。要确认键盘已激活，请查看屏幕底部是否显示 'ADB Keyboard {ON}' 类似的文本，或者检查输入框是否处于激活/高亮状态。不要仅仅依赖视觉上的键盘显示。自动清除文本：当你使用输入操作时，输入框中现有的任何文本（包括占位符文本和实际输入）都会在输入新文本前自动清除。你无需在输入前手动清除文本——直接使用输入操作输入所需文本即可。操作完成后，你将自动收到结果状态的截图。\n"
+    @"- {\"action\":\"Type_Name\",\"text\":\"xxx\"}\n"
+    @"    Type_Name是输入人名的操作，基本功能同Type。\n"
+    @"- {\"action\":\"Interact\"}\n"
+    @"    Interact是当有多个满足条件的选项时而触发的交互操作，询问用户如何选择。\n"
+    @"- {\"action\":\"Swipe\",\"start\":[x1,y1],\"end\":[x2,y2]}\n"
+    @"    Swipe是滑动操作，通过从起始坐标拖动到结束坐标来执行滑动手势。可用于滚动内容、在屏幕之间导航、下拉通知栏以及项目栏或进行基于手势的导航。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。滑动持续时间会自动调整以实现自然的移动。此操作完成后，您将自动收到结果状态的截图。\n"
+    @"- {\"action\":\"Note\",\"message\":\"True\"}\n"
+    @"    记录当前页面内容以便后续总结。\n"
+    @"- {\"action\":\"Call_API\",\"instruction\":\"xxx\"}\n"
+    @"    总结或评论当前页面或已记录的内容。\n"
+    @"- {\"action\":\"Long Press\",\"element\":[x,y]}\n"
+    @"    Long Pres是长按操作，在屏幕上的特定点长按指定时间。可用于触发上下文菜单、选择文本或激活长按交互。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的屏幕截图。\n"
+    @"- {\"action\":\"Double Tap\",\"element\":[x,y]}\n"
+    @"    Double Tap在屏幕上的特定点快速连续点按两次。使用此操作可以激活双击交互，如缩放、选择文本或打开项目。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。\n"
+    @"- {\"action\":\"Take_over\",\"message\":\"xxx\"}\n"
+    @"    Take_over是接管操作，表示在登录和验证阶段需要用户协助。\n"
+    @"- {\"action\":\"Back\"}\n"
+    @"    导航返回到上一个屏幕或关闭当前对话框。相当于按下 Android 的返回按钮。使用此操作可以从更深的屏幕返回、关闭弹出窗口或退出当前上下文。此操作完成后，您将自动收到结果状态的截图。\n"
+    @"- {\"action\":\"Home\"}\n"
+    @"    Home是回到系统桌面的操作，相当于按下 Android 主屏幕按钮。使用此操作可退出当前应用并返回启动器，或从已知状态启动新任务。此操作完成后，您将自动收到结果状态的截图。\n"
+    @"- {\"action\":\"Wait\",\"duration\":\"x seconds\"}\n"
+    @"    等待页面加载，x为需要等待多少秒。\n"
+    @"- {\"action\":\"Finish\",\"message\":\"xxx\"}\n"
+    @"    Finish是结束任务的操作，表示准确完整完成任务，message是终止信息。\n"
+  , date];
+}
+
+- (NSArray<NSDictionary *> *)sanitizePlanChecklist:(id)planObj
+{
+  if (![planObj isKindOfClass:NSArray.class]) {
+    return nil;
+  }
+  NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+  for (id item in (NSArray *)planObj) {
+    if ([item isKindOfClass:NSString.class]) {
+      NSString *t = AutoGLMTrim((NSString *)item);
+      if (t.length == 0) {
+        continue;
+      }
+      [out addObject:@{@"text": t, @"done": @NO}];
+      continue;
+    }
+    if (![item isKindOfClass:NSDictionary.class]) {
+      continue;
+    }
+    NSDictionary *d = (NSDictionary *)item;
+    NSString *text = @"";
+    if ([d[@"text"] isKindOfClass:NSString.class]) {
+      text = AutoGLMTrim((NSString *)d[@"text"]);
+    } else if ([d[@"item"] isKindOfClass:NSString.class]) {
+      text = AutoGLMTrim((NSString *)d[@"item"]);
+    }
+    if (text.length == 0) {
+      continue;
+    }
+    BOOL done = AutoGLMParseBool(d[@"done"], NO);
+    [out addObject:@{@"text": text, @"done": @(done)}];
+  }
+
+  if (out.count == 0) {
+    return nil;
+  }
+  if (out.count > 12) {
+    return [out subarrayWithRange:NSMakeRange(0, 12)];
+  }
+  return out.copy;
+}
+
+- (NSString *)planChecklistText
+{
+  NSArray<NSDictionary *> *plan = self.planChecklist;
+  if (plan.count == 0) {
+    return @"";
+  }
+  NSMutableString *s = [NSMutableString string];
+  [s appendString:@"** Plan Checklist **\n"];
+  NSInteger idx = 1;
+  for (NSDictionary *it in plan) {
+    NSString *text = [it[@"text"] isKindOfClass:NSString.class] ? (NSString *)it[@"text"] : @"";
+    BOOL done = AutoGLMParseBool(it[@"done"], NO);
+    if (text.length == 0) {
+      continue;
+    }
+    [s appendFormat:@"%ld. [%@] %@\n", (long)idx, done ? @"x" : @" ", text];
+    idx += 1;
+  }
+  return s.copy;
+}
+
+- (NSURL *)chatCompletionsURL
+{
+  NSString *baseURL = AutoGLMTrim(AutoGLMStringOrEmpty(self.config[kAutoGLMBaseURLKey]));
+  while ([baseURL hasSuffix:@"/"]) {
+    baseURL = [baseURL substringToIndex:baseURL.length - 1];
+  }
+  NSURL *base = [NSURL URLWithString:baseURL];
+  if (base == nil) {
+    return nil;
+  }
+
+  NSString *path = base.path ?: @"";
+  if ([path hasSuffix:@"/chat/completions"]) {
+    return base;
+  }
+
+  // Some providers expose OpenAI-compatible chat completions under a different version prefix,
+  // for example: https://.../api/v3/chat/completions (no /v1).
+  if ([path hasSuffix:@"/v1"] || [path hasSuffix:@"/api/v3"]) {
+    return [base URLByAppendingPathComponent:@"chat/completions"];
+  }
+
+  NSURL *v1 = base;
+  if (![path hasSuffix:@"/v1"]) {
+    v1 = [base URLByAppendingPathComponent:@"v1"];
+  }
+  return [v1 URLByAppendingPathComponent:@"chat/completions"];
+}
+
+- (NSData *)takeScreenshotPNG
+{
+  __block NSData *png = nil;
+  dispatch_sync(dispatch_get_main_queue(), ^{
+    XCUIScreenshot *shot = [[XCUIScreen mainScreen] screenshot];
+    png = shot.PNGRepresentation;
+  });
+  return png;
+}
+
+- (NSString *)buildScreenInfoJSON
+{
+  __block NSString *bundleId = @"";
+  dispatch_sync(dispatch_get_main_queue(), ^{
+    XCUIApplication *active = XCUIApplication.fb_activeApplication;
+    NSArray<NSDictionary<NSString *, id> *> *infos = [XCUIApplication fb_activeAppsInfo];
+
+    for (NSDictionary<NSString *, id> *info in infos) {
+      NSString *candidateId = [info[@"bundleId"] isKindOfClass:NSString.class] ? (NSString *)info[@"bundleId"] : nil;
+      candidateId = AutoGLMTrim(candidateId ?: @"");
+      if (candidateId.length == 0 || [candidateId isEqualToString:@"unknown"]) {
+        continue;
+      }
+      XCUIApplication *candidate = [[XCUIApplication alloc] initWithBundleIdentifier:candidateId];
+      if ([candidate fb_isSameAppAs:active]) {
+        bundleId = candidateId;
+        break;
+      }
+    }
+
+    if (bundleId.length == 0) {
+      for (NSDictionary<NSString *, id> *info in infos) {
+        NSString *candidateId = [info[@"bundleId"] isKindOfClass:NSString.class] ? (NSString *)info[@"bundleId"] : nil;
+        candidateId = AutoGLMTrim(candidateId ?: @"");
+        if (candidateId.length == 0 || [candidateId isEqualToString:@"unknown"]) {
+          continue;
+        }
+        bundleId = candidateId;
+        break;
+      }
+    }
+  });
+
+  NSString *appName = AutoGLMAppNameForBundleId(bundleId);
+  NSString *currentApp = appName.length > 0 ? appName : (bundleId.length > 0 ? bundleId : @"");
+  NSDictionary *info = @{
+    @"current_app": currentApp,
+    @"bundle_id": bundleId ?: @"",
+  };
+  return AutoGLMJSONStringFromObject(info);
+}
+
+- (void)stripImagesFromLastUserMessage
+{
+  if (self.context.count == 0) {
+    return;
+  }
+  NSDictionary *last = self.context.lastObject;
+  if (![last isKindOfClass:NSDictionary.class]) {
+    return;
+  }
+  if (![[last objectForKey:@"role"] isEqual:@"user"]) {
+    return;
+  }
+  id content = last[@"content"];
+  if (![content isKindOfClass:NSArray.class]) {
+    return;
+  }
+
+  NSMutableArray *textOnly = [NSMutableArray array];
+  for (id part in (NSArray *)content) {
+    if (![part isKindOfClass:NSDictionary.class]) {
+      continue;
+    }
+    if ([((NSDictionary *)part)[@"type"] isEqual:@"text"]) {
+      [textOnly addObject:part];
+    }
+  }
+
+  NSMutableDictionary *mut = [last mutableCopy];
+  mut[@"content"] = [textOnly copy];
+  self.context[self.context.count - 1] = [mut copy];
+}
+
+- (NSString *)extractAnswerPayload:(NSString *)text
+{
+  if (text.length == 0) {
+    return text;
+  }
+  NSRange start = [text rangeOfString:@"<answer>"];
+  NSRange end = [text rangeOfString:@"</answer>"];
+  if (start.location != NSNotFound && end.location != NSNotFound && end.location > (start.location + start.length)) {
+    NSString *inner = [text substringWithRange:NSMakeRange(start.location + start.length, end.location - (start.location + start.length))];
+    return AutoGLMTrim(inner);
+  }
+  return AutoGLMTrim(text);
+}
+
+- (NSString *)extractThinkingPayload:(NSString *)text
+{
+  if (text.length == 0) {
+    return @"";
+  }
+
+  // If the assistant starts directly with <answer>, there is no "thinking" text in content.
+  // (We may still have provider-specific reasoning fields handled separately.)
+  NSString *allTrimmed = AutoGLMTrim(text);
+  if ([allTrimmed hasPrefix:@"<answer>"]) {
+    return @"";
+  }
+
+  // 1) Explicit <think>...</think>
+  NSRange start = [text rangeOfString:@"<think>"];
+  NSRange end = [text rangeOfString:@"</think>"];
+  if (start.location != NSNotFound && end.location != NSNotFound && end.location > (start.location + start.length)) {
+    NSString *inner = [text substringWithRange:NSMakeRange(start.location + start.length, end.location - (start.location + start.length))];
+    return AutoGLMTrim(inner);
+  }
+
+  // 2) No <think>, but there is an <answer>: use everything before <answer> as thinking (same idea as python client).
+  NSRange answer = [text rangeOfString:@"<answer>"];
+  if (answer.location != NSNotFound && answer.location > 0) {
+    NSString *before = [text substringToIndex:answer.location];
+    NSString *trimmed = AutoGLMTrim(before);
+    return trimmed;
+  }
+
+  // 3) Fallback: if there is a JSON object, use everything before the first '{' as thinking.
+  NSRange firstBrace = [text rangeOfString:@"{"];
+  if (firstBrace.location != NSNotFound && firstBrace.location > 0) {
+    NSString *before = [text substringToIndex:firstBrace.location];
+    NSString *trimmed = AutoGLMTrim(before);
+    return trimmed;
+  }
+
+  return @"";
+}
+
+- (NSString *)firstJSONObjectStringFromText:(NSString *)text error:(NSError **)error
+{
+  NSString *s = text ?: @"";
+  NSRange start = [s rangeOfString:@"{"];
+  if (start.location == NSNotFound) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:1 userInfo:@{NSLocalizedDescriptionKey: @"No JSON object found in model output"}];
+    }
+    return nil;
+  }
+  NSRange end = [s rangeOfString:@"}" options:NSBackwardsSearch];
+  if (end.location == NSNotFound || end.location <= start.location) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Unterminated JSON object in model output"}];
+    }
+    return nil;
+  }
+  return [s substringWithRange:NSMakeRange(start.location, end.location - start.location + 1)];
+}
+
+- (NSDictionary *)parseActionFromModelText:(NSString *)text error:(NSError **)error
+{
+  NSString *payload = [self extractAnswerPayload:text];
+  NSError *extractErr = nil;
+  NSString *jsonStr = [self firstJSONObjectStringFromText:payload error:&extractErr];
+  if (jsonStr.length == 0) {
+    if (error) {
+      *error = extractErr;
+    }
+    return nil;
+  }
+
+  NSData *data = [jsonStr dataUsingEncoding:NSUTF8StringEncoding];
+  NSError *jsonErr = nil;
+  id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
+  if ([obj isKindOfClass:NSDictionary.class]) {
+    NSMutableDictionary *mut = [((NSDictionary *)obj) mutableCopy];
+    // Some models may mistakenly wrap the action payload as an object:
+    // {"think":"...","action":{"action":"Launch","app":"..."},"plan":[...]}
+    // Flatten it back to the expected shape: {"action":"Launch","app":"...","think":"...","plan":[...]}
+    id actionField = mut[@"action"];
+    if ([actionField isKindOfClass:NSDictionary.class]) {
+      NSDictionary *inner = (NSDictionary *)actionField;
+      id innerAction = inner[@"action"];
+      if ([innerAction isKindOfClass:NSString.class]) {
+        [mut removeObjectForKey:@"action"];
+        for (NSString *key in inner) {
+          if ([key isEqualToString:@"think"] || [key isEqualToString:@"plan"]) {
+            continue;
+          }
+          id v = inner[key];
+          if (v != nil) {
+            mut[key] = v;
+          }
+        }
+        mut[@"action"] = innerAction;
+      }
+    }
+    return mut.copy;
+  }
+
+  if (error) {
+    *error = jsonErr;
+  }
+  return nil;
+}
+
+- (NSString *)contentFromOpenAIResponse:(NSDictionary *)json
+{
+  NSArray *choices = json[@"choices"];
+  if (![choices isKindOfClass:NSArray.class] || choices.count == 0) {
+    return nil;
+  }
+  NSDictionary *choice0 = choices.firstObject;
+  NSDictionary *message = [choice0 isKindOfClass:NSDictionary.class] ? choice0[@"message"] : nil;
+  if (![message isKindOfClass:NSDictionary.class]) {
+    return nil;
+  }
+  id content = message[@"content"];
+  if ([content isKindOfClass:NSString.class]) {
+    return (NSString *)content;
+  }
+  if ([content isKindOfClass:NSArray.class]) {
+    NSMutableString *acc = [NSMutableString string];
+    for (id part in (NSArray *)content) {
+      if (![part isKindOfClass:NSDictionary.class]) {
+        continue;
+      }
+      NSString *type = ((NSDictionary *)part)[@"type"];
+      if ([type isEqualToString:@"text"]) {
+        NSString *t = ((NSDictionary *)part)[@"text"];
+        if ([t isKindOfClass:NSString.class]) {
+          [acc appendString:t];
+        }
+      }
+    }
+    return acc.copy;
+  }
+  return nil;
+}
+
+- (NSDictionary *)messageFromOpenAIResponse:(NSDictionary *)json
+{
+  NSArray *choices = json[@"choices"];
+  if (![choices isKindOfClass:NSArray.class] || choices.count == 0) {
+    return nil;
+  }
+  NSDictionary *choice0 = choices.firstObject;
+  NSDictionary *message = [choice0 isKindOfClass:NSDictionary.class] ? choice0[@"message"] : nil;
+  return [message isKindOfClass:NSDictionary.class] ? message : nil;
+}
+
+- (NSString *)reasoningFromOpenAIResponse:(NSDictionary *)json
+{
+  NSArray *choices = json[@"choices"];
+  if (![choices isKindOfClass:NSArray.class] || choices.count == 0) {
+    return @"";
+  }
+  NSDictionary *choice0 = choices.firstObject;
+  NSDictionary *message = [choice0 isKindOfClass:NSDictionary.class] ? choice0[@"message"] : nil;
+  if (![message isKindOfClass:NSDictionary.class]) {
+    return @"";
+  }
+
+  // Common OpenAI-compatible extensions used by some providers.
+  for (NSString *key in @[@"reasoning_content", @"reasoning", @"thinking", @"analysis"]) {
+    id v = message[key];
+    if ([v isKindOfClass:NSString.class]) {
+      NSString *s = AutoGLMTrim((NSString *)v);
+      if (s.length > 0) {
+        return s;
+      }
+    }
+  }
+
+  // Some providers may return structured content parts, including reasoning/thinking segments.
+  id content = message[@"content"];
+  if ([content isKindOfClass:NSArray.class]) {
+    NSMutableString *acc = [NSMutableString string];
+    for (id part in (NSArray *)content) {
+      if (![part isKindOfClass:NSDictionary.class]) {
+        continue;
+      }
+      NSString *type = ((NSDictionary *)part)[@"type"];
+      if (![type isKindOfClass:NSString.class]) {
+        continue;
+      }
+      NSString *lower = [(NSString *)type lowercaseString];
+      if (![lower isEqualToString:@"reasoning"] && ![lower isEqualToString:@"thinking"] && ![lower isEqualToString:@"analysis"]) {
+        continue;
+      }
+      NSString *t = ((NSDictionary *)part)[@"text"];
+      if ([t isKindOfClass:NSString.class]) {
+        [acc appendString:t];
+      }
+    }
+    return AutoGLMTrim(acc.copy);
+  }
+
+  return @"";
+}
+
+- (NSDictionary *)callModelWithMessages:(NSArray<NSDictionary *> *)messages error:(NSError **)error
+{
+  NSURL *url = [self chatCompletionsURL];
+  if (url == nil) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Invalid base_url"}];
+    }
+    return nil;
+  }
+
+  NSDictionary *body = @{
+    @"model": AutoGLMStringOrEmpty(self.config[kAutoGLMModelKey]),
+    @"messages": messages ?: @[],
+    @"temperature": @1,
+    @"max_tokens": @32768,
+  };
+
+  NSData *payload = [NSJSONSerialization dataWithJSONObject:body options:0 error:error];
+  if (payload == nil) {
+    return nil;
+  }
+
+  NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+  req.HTTPMethod = @"POST";
+  req.HTTPBody = payload;
+  [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+  NSString *apiKey = AutoGLMNormalizeApiKey(AutoGLMStringOrEmpty(self.config[kAutoGLMApiKeyKey]));
+  if (apiKey.length > 0) {
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
+  }
+
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  __block NSData *respData = nil;
+  __block NSError *respErr = nil;
+  __block NSInteger statusCode = 0;
+
+  NSURLSessionDataTask *t = [self.session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+    if ([resp isKindOfClass:NSHTTPURLResponse.class]) {
+      statusCode = ((NSHTTPURLResponse *)resp).statusCode;
+    }
+    respData = data;
+    respErr = err;
+    dispatch_semaphore_signal(sem);
+  }];
+  [t resume];
+
+  double timeout = AutoGLMParseDouble(self.config[kAutoGLMTimeoutSecondsKey], 90.0);
+  dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
+  if (dispatch_semaphore_wait(sem, deadline) != 0) {
+    [t cancel];
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:4 userInfo:@{NSLocalizedDescriptionKey: @"LLM request timed out"}];
+    }
+    return nil;
+  }
+
+  if (respErr != nil) {
+    if (error) {
+      *error = respErr;
+    }
+    return nil;
+  }
+  if (respData == nil) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:5 userInfo:@{NSLocalizedDescriptionKey: @"Empty LLM response body"}];
+    }
+    return nil;
+  }
+  if (statusCode < 200 || statusCode >= 300) {
+    NSString *bodyText = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding] ?: @"";
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:6 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"LLM HTTP %ld: %@", (long)statusCode, bodyText]}];
+    }
+    return nil;
+  }
+
+  NSDictionary *json = [NSJSONSerialization JSONObjectWithData:respData options:0 error:error];
+  if (![json isKindOfClass:NSDictionary.class]) {
+    if (error && *error == nil) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:7 userInfo:@{NSLocalizedDescriptionKey: @"LLM response is not JSON object"}];
+    }
+    return nil;
+  }
+  return json;
+}
+
+- (BOOL)performAction:(NSDictionary *)action error:(NSError **)error
+{
+  NSString *actionName = [action[@"action"] isKindOfClass:NSString.class] ? AutoGLMNormalizeActionName((NSString *)action[@"action"]) : @"";
+  if (actionName.length == 0) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:8 userInfo:@{NSLocalizedDescriptionKey: @"Missing action name"}];
+    }
+    return NO;
+  }
+
+  // Non-UI actions (do not block the main thread)
+  if ([actionName isEqualToString:@"wait"]) {
+    double seconds = AutoGLMParseDouble(action[@"seconds"], 0.0);
+    if (seconds <= 0.0) {
+      NSString *duration = AutoGLMTrim(AutoGLMStringOrEmpty(action[@"duration"]));
+      NSString *clean = [[duration lowercaseString] stringByReplacingOccurrencesOfString:@"seconds" withString:@""];
+      clean = AutoGLMTrim(clean);
+      seconds = [clean doubleValue];
+    }
+    if (seconds <= 0.0) {
+      seconds = 1.0;
+    }
+    [NSThread sleepForTimeInterval:seconds];
+    return YES;
+  }
+  if ([actionName isEqualToString:@"note"]) {
+    NSString *msg = AutoGLMStringOrEmpty(action[@"message"]);
+    if (msg.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Note: %@", AutoGLMTruncate(msg, 800)]];
+    } else {
+      [self emit:@"[AUTOGLM] Note"];
+    }
+    return YES;
+  }
+  if ([actionName isEqualToString:@"call_api"]) {
+    NSString *instr = AutoGLMStringOrEmpty(action[@"instruction"]);
+    if (instr.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Call_API: %@", AutoGLMTruncate(instr, 800)]];
+    } else {
+      [self emit:@"[AUTOGLM] Call_API"];
+    }
+    return YES;
+  }
+  if ([actionName isEqualToString:@"interact"]) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:12 userInfo:@{NSLocalizedDescriptionKey: @"User interaction required (Interact)"}];
+    }
+    return NO;
+  }
+  if ([actionName isEqualToString:@"take_over"]) {
+    NSString *msg = AutoGLMStringOrEmpty(action[@"message"]);
+    if (msg.length == 0) {
+      msg = @"User takeover required (Take_over)";
+    }
+    if (error) {
+      *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:13 userInfo:@{NSLocalizedDescriptionKey: msg}];
+    }
+    return NO;
+  }
+
+  __block BOOL ok = YES;
+  __block NSError *innerErr = nil;
+  __block NSString *launchedBundleId = nil;
+  dispatch_sync(dispatch_get_main_queue(), ^{
+    @try {
+      XCUIApplication *active = XCUIApplication.fb_activeApplication;
+
+      if ([actionName isEqualToString:@"launch"]) {
+        NSString *appName = nil;
+        if ([action[@"app"] isKindOfClass:NSString.class]) {
+          appName = action[@"app"];
+        } else if ([action[@"app_name"] isKindOfClass:NSString.class]) {
+          appName = action[@"app_name"];
+        }
+
+        NSString *bundleId = nil;
+        if (appName.length > 0) {
+          bundleId = AutoGLMBundleIdForAppName(appName);
+        }
+        if (bundleId.length == 0) {
+          if ([action[@"bundle_id"] isKindOfClass:NSString.class]) {
+            bundleId = action[@"bundle_id"];
+          } else if ([action[@"bundleId"] isKindOfClass:NSString.class]) {
+            bundleId = action[@"bundleId"];
+          } else if ([action[@"bundleID"] isKindOfClass:NSString.class]) {
+            bundleId = action[@"bundleID"];
+          }
+          bundleId = AutoGLMTrim(bundleId ?: @"");
+        }
+
+        if (bundleId.length == 0) {
+          ok = NO;
+          innerErr = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:9 userInfo:@{NSLocalizedDescriptionKey: @"launch requires app (e.g. '小红书') or bundle_id"}];
+          return;
+        }
+        [self emit:[NSString stringWithFormat:@"[AUTOGLM] launch app=%@ bundleId=%@", appName ?: @"", bundleId]];
+        XCUIApplication *app = [[XCUIApplication alloc] initWithBundleIdentifier:bundleId];
+        if (app.state == XCUIApplicationStateNotRunning) {
+          [app launch];
+        } else {
+          [app activate];
+        }
+        launchedBundleId = bundleId;
+        return;
+      }
+
+      if ([actionName isEqualToString:@"home"]) {
+        [[XCUIDevice sharedDevice] pressButton:XCUIDeviceButtonHome];
+        return;
+      }
+
+      if ([actionName isEqualToString:@"back"]) {
+        XCUICoordinate *start = [active coordinateWithNormalizedOffset:CGVectorMake(0.03, 0.5)];
+        XCUICoordinate *end = [active coordinateWithNormalizedOffset:CGVectorMake(0.6, 0.5)];
+        [start pressForDuration:0.1 thenDragToCoordinate:end];
+        return;
+      }
+
+      if ([actionName isEqualToString:@"type"]) {
+        NSString *text = AutoGLMStringOrEmpty(action[@"text"]);
+        XCUIElement *focused = [active fb_activeElement];
+        if (focused != nil) {
+          NSError *typeErr = nil;
+          BOOL typed = [focused fb_typeText:text shouldClear:YES error:&typeErr];
+          if (!typed) {
+            [active typeText:text];
+          }
+        } else {
+          [active typeText:text];
+        }
+        NSError *kbErr = nil;
+        (void)[active fb_dismissKeyboardWithKeyNames:nil error:&kbErr];
+        return;
+      }
+
+      double x = 0.5;
+      double y = 0.5;
+      if ([action[@"x"] isKindOfClass:NSNumber.class] && [action[@"y"] isKindOfClass:NSNumber.class]) {
+        x = [action[@"x"] doubleValue];
+        y = [action[@"y"] doubleValue];
+      } else if ([action[@"element"] isKindOfClass:NSArray.class] && [((NSArray *)action[@"element"]) count] == 2) {
+        NSArray *el = action[@"element"];
+        if ([el[0] isKindOfClass:NSNumber.class] && [el[1] isKindOfClass:NSNumber.class]) {
+          x = [el[0] doubleValue] / 1000.0;
+          y = [el[1] doubleValue] / 1000.0;
+        }
+      }
+      x = AutoGLMClamp01(x);
+      y = AutoGLMClamp01(y);
+
+      if ([actionName isEqualToString:@"tap"] || [actionName isEqualToString:@"double_tap"] || [actionName isEqualToString:@"long_press"]) {
+        XCUICoordinate *coord = [active coordinateWithNormalizedOffset:CGVectorMake(x, y)];
+        if ([actionName isEqualToString:@"tap"]) {
+          NSString *sensitive = AutoGLMStringOrEmpty(action[@"message"]);
+          if (sensitive.length > 0) {
+            [self emit:[NSString stringWithFormat:@"[AUTOGLM] Sensitive tap: %@", AutoGLMTruncate(sensitive, 200)]];
+          }
+          [coord tap];
+          return;
+        }
+        if ([actionName isEqualToString:@"double_tap"]) {
+          [coord doubleTap];
+          return;
+        }
+        double seconds = AutoGLMParseDouble(action[@"seconds"], 0.0);
+        if (seconds <= 0.0) {
+          seconds = 3.0;
+        }
+        [coord pressForDuration:seconds];
+        return;
+      }
+
+      if ([actionName isEqualToString:@"swipe"]) {
+        double sx = AutoGLMParseDouble(action[@"sx"], 0.5);
+        double sy = AutoGLMParseDouble(action[@"sy"], 0.8);
+        double ex = AutoGLMParseDouble(action[@"ex"], 0.5);
+        double ey = AutoGLMParseDouble(action[@"ey"], 0.2);
+        if ([action[@"start"] isKindOfClass:NSArray.class] && [((NSArray *)action[@"start"]) count] == 2) {
+          NSArray *st = action[@"start"];
+          if ([st[0] isKindOfClass:NSNumber.class] && [st[1] isKindOfClass:NSNumber.class]) {
+            sx = [st[0] doubleValue] / 1000.0;
+            sy = [st[1] doubleValue] / 1000.0;
+          }
+        }
+        if ([action[@"end"] isKindOfClass:NSArray.class] && [((NSArray *)action[@"end"]) count] == 2) {
+          NSArray *ed = action[@"end"];
+          if ([ed[0] isKindOfClass:NSNumber.class] && [ed[1] isKindOfClass:NSNumber.class]) {
+            ex = [ed[0] doubleValue] / 1000.0;
+            ey = [ed[1] doubleValue] / 1000.0;
+          }
+        }
+        sx = AutoGLMClamp01(sx);
+        sy = AutoGLMClamp01(sy);
+        ex = AutoGLMClamp01(ex);
+        ey = AutoGLMClamp01(ey);
+
+        double seconds = AutoGLMParseDouble(action[@"seconds"], 0.3);
+        XCUICoordinate *start = [active coordinateWithNormalizedOffset:CGVectorMake(sx, sy)];
+        XCUICoordinate *end = [active coordinateWithNormalizedOffset:CGVectorMake(ex, ey)];
+        [start pressForDuration:seconds thenDragToCoordinate:end];
+        return;
+      }
+
+      ok = NO;
+      innerErr = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:10 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Unknown action: %@", actionName]}];
+    } @catch (NSException *exception) {
+      ok = NO;
+      NSString *reason = exception.reason ?: @"Unknown exception";
+      innerErr = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:11 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Exception while executing action '%@': %@", actionName, reason]}];
+    }
+  });
+
+  if (ok && launchedBundleId.length > 0) {
+    (void)AutoGLMWaitForActiveBundleId(launchedBundleId, 5.0);
+  }
+
+  if (!ok && error) {
+    *error = innerErr;
+  }
+  return ok;
+}
+
+- (void)runLoop
+{
+  NSString *task = AutoGLMTrim(AutoGLMStringOrEmpty(self.config[kAutoGLMTaskKey]));
+  NSInteger maxSteps = AutoGLMParseInt(self.config[kAutoGLMMaxStepsKey], 30);
+  double stepDelay = AutoGLMParseDouble(self.config[kAutoGLMStepDelaySecondsKey], 0.5);
+
+  [self emit:[NSString stringWithFormat:@"[AUTOGLM] Starting (maxSteps=%ld)", (long)maxSteps]];
+  [self emit:[NSString stringWithFormat:@"[AUTOGLM] Task: %@", task]];
+
+  [self.context removeAllObjects];
+  [self.context addObject:@{@"role": @"system", @"content": [self buildSystemPrompt] ?: @""}];
+
+  for (NSInteger step = 0; step < maxSteps; step++) {
+    if (self.stopRequested) {
+      [self emit:@"[AUTOGLM] Stop requested."];
+      if (self.finish) {
+        self.finish(NO, @"Stopped");
+      }
+      return;
+    }
+
+    NSData *png = [self takeScreenshotPNG];
+    if (png.length == 0) {
+      [self emit:@"[AUTOGLM] Failed to capture screenshot."];
+      if (self.finish) {
+        self.finish(NO, @"Failed to capture screenshot");
+      }
+      return;
+    }
+    NSString *b64 = [png base64EncodedStringWithOptions:0];
+
+    NSString *screenInfo = [self buildScreenInfoJSON];
+    NSString *textContent = nil;
+    if (step == 0) {
+      textContent = [NSString stringWithFormat:@"%@\n\n%@", task, screenInfo ?: @"{}"];
+    } else {
+      NSString *planText = [self planChecklistText];
+      if (planText.length > 0) {
+        textContent = [NSString stringWithFormat:@"%@\n\n** Screen Info **\n\n%@", planText, screenInfo ?: @"{}"];
+      } else {
+        textContent = [NSString stringWithFormat:@"** Screen Info **\n\n%@", screenInfo ?: @"{}"];
+      }
+    }
+
+    NSDictionary *userMessage = @{
+      @"role": @"user",
+      @"content": @[
+        @{@"type": @"text", @"text": textContent ?: @""},
+        @{@"type": @"image_url", @"image_url": @{@"url": [NSString stringWithFormat:@"data:image/png;base64,%@", b64 ?: @""]}},
+      ],
+    };
+    [self.context addObject:userMessage];
+
+    NSError *callErr = nil;
+    NSDictionary *resp = [self callModelWithMessages:self.context error:&callErr];
+    [self stripImagesFromLastUserMessage];
+    if (resp == nil) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] LLM call failed: %@", callErr.localizedDescription ?: callErr]];
+      if (self.finish) {
+        self.finish(NO, callErr.localizedDescription ?: @"LLM call failed");
+      }
+      return;
+    }
+
+    BOOL debugRaw = AutoGLMParseBool(self.config[kAutoGLMDebugLogRawAssistantKey], YES);
+    if (debugRaw) {
+      NSDictionary *msg = [self messageFromOpenAIResponse:resp];
+      if (msg != nil) {
+        NSString *rawMsg = AutoGLMTruncate(AutoGLMJSONStringFromObject(msg), 2000);
+        if (rawMsg.length > 0) {
+          [self emit:[NSString stringWithFormat:@"[AUTOGLM] Raw assistant message (truncated): %@", rawMsg]];
+        }
+      }
+    }
+
+    NSString *content = [self contentFromOpenAIResponse:resp];
+    if (content.length == 0) {
+      [self emit:@"[AUTOGLM] Empty model content."];
+      if (self.finish) {
+        self.finish(NO, @"Empty model content");
+      }
+      return;
+    }
+
+    NSString *modelReasoning = [self reasoningFromOpenAIResponse:resp];
+    if (modelReasoning.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Model reasoning: %@", AutoGLMTruncate(modelReasoning, 800)]];
+    }
+
+    NSString *thinking = [self extractThinkingPayload:content];
+    if (thinking.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Thinking: %@", AutoGLMTruncate(thinking, 800)]];
+    } else if (modelReasoning.length == 0) {
+      NSString *rawPreview = AutoGLMTruncate(AutoGLMTrim(content), 400);
+      if (rawPreview.length > 0) {
+        [self emit:[NSString stringWithFormat:@"[AUTOGLM] Raw model content (truncated): %@", rawPreview]];
+      }
+    }
+
+    NSInteger maxActionRetries = 2;
+    NSString *contentForParse = content;
+    NSDictionary *action = nil;
+    NSError *parseErr = nil;
+
+    for (NSInteger attempt = 0; attempt <= maxActionRetries; attempt++) {
+      parseErr = nil;
+      action = [self parseActionFromModelText:contentForParse error:&parseErr];
+      if (action != nil) {
+        break;
+      }
+
+      NSString *errMsg = parseErr.localizedDescription ?: @"Unknown parse error";
+      NSString *rawPreview = AutoGLMTruncate(AutoGLMTrim(contentForParse), 600);
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Cannot parse action (attempt %ld/%ld): %@ (raw=%@)", (long)(attempt + 1), (long)(maxActionRetries + 1), errMsg, rawPreview]];
+
+      if (attempt >= maxActionRetries) {
+        break;
+      }
+
+      NSString *badOutput = AutoGLMTruncate(AutoGLMTrim(contentForParse), 4000);
+      NSString *fixText = [NSString stringWithFormat:
+        @"你上一条输出无法解析为合法 JSON（错误：%@）。\n"
+        @"请仅输出 1 个合法的 JSON 对象（不要输出任何多余文本、不要输出 <think>/<answer> 标签、不要输出代码块）。\n"
+        @"要求：该 JSON 必须包含键 \"action\"，并尽量保持与你上一条输出的意图一致；推理说明请放到字符串字段 \"think\"；并继续包含/更新 checklist 字段 \"plan\"。\n"
+        @"上一条输出如下：\n%@",
+        errMsg,
+        badOutput];
+
+      NSDictionary *repairUser = @{
+        @"role": @"user",
+        @"content": @[
+          @{@"type": @"text", @"text": fixText ?: @""},
+        ],
+      };
+
+      NSArray *messagesForFix = [self.context arrayByAddingObject:repairUser];
+      NSError *fixCallErr = nil;
+      NSDictionary *fixResp = [self callModelWithMessages:messagesForFix error:&fixCallErr];
+      if (fixResp == nil) {
+        [self emit:[NSString stringWithFormat:@"[AUTOGLM] LLM fix call failed: %@", fixCallErr.localizedDescription ?: fixCallErr]];
+        if (self.finish) {
+          self.finish(NO, fixCallErr.localizedDescription ?: @"LLM fix call failed");
+        }
+        return;
+      }
+      NSString *fixContent = [self contentFromOpenAIResponse:fixResp];
+      if (fixContent.length == 0) {
+        [self emit:@"[AUTOGLM] Empty model content for fix attempt."];
+        break;
+      }
+      contentForParse = fixContent;
+    }
+
+    if (action == nil) {
+      NSString *stopMsg = [NSString stringWithFormat:@"模型输出的 action JSON 格式错误，已连续 %ld 次无法解析。为避免误操作，已停止任务。", (long)(maxActionRetries + 1)];
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] %@", stopMsg]];
+      if (self.finish) {
+        self.finish(NO, stopMsg);
+      }
+      return;
+    }
+
+    NSArray<NSDictionary *> *newPlan = [self sanitizePlanChecklist:action[@"plan"]];
+    if (newPlan != nil) {
+      self.planChecklist = newPlan;
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Plan updated (%lu items)", (unsigned long)newPlan.count]];
+    }
+
+    NSString *actionThink = [action[@"think"] isKindOfClass:NSString.class] ? AutoGLMTrim((NSString *)action[@"think"]) : @"";
+    if (actionThink.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Action think: %@", AutoGLMTruncate(actionThink, 800)]];
+    }
+
+    NSString *actionName = [action[@"action"] isKindOfClass:NSString.class] ? AutoGLMNormalizeActionName((NSString *)action[@"action"]) : @"";
+    [self emit:[NSString stringWithFormat:@"[AUTOGLM] Step %ld action=%@ payload=%@", (long)step, actionName, AutoGLMJSONStringFromObject(action)]];
+
+    if ([actionName isEqualToString:@"finish"]) {
+      NSString *msg = AutoGLMStringOrEmpty(action[@"message"]);
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Finished: %@", msg]];
+      if (self.finish) {
+        self.finish(YES, msg.length > 0 ? msg : @"Finished");
+      }
+      return;
+    }
+
+    NSError *actErr = nil;
+    if (![self performAction:action error:&actErr]) {
+      NSString *failMsg = actErr.localizedDescription ?: @"Action failed";
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Action failed: %@", failMsg]];
+      if (self.finish) {
+        self.finish(NO, failMsg);
+      }
+      return;
+    }
+
+    // Keep assistant history aligned with the JSON-only contract to avoid "training" the model
+    // back into emitting <think>/<answer> wrappers.
+    [self.context addObject:@{@"role": @"assistant", @"content": AutoGLMJSONStringFromObject(action) ?: @""}];
+
+    if (stepDelay > 0) {
+      [NSThread sleepForTimeInterval:stepDelay];
+    }
+  }
+
+  if (self.finish) {
+    [self emit:@"[AUTOGLM] Max steps reached."];
+    self.finish(NO, @"Max steps reached");
+  }
+}
+
+- (void)start
+{
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    [self runLoop];
+  });
+}
+
+- (void)requestStop
+{
+  self.stopRequested = YES;
+}
+
+#pragma mark - NSURLSessionDelegate
+
+- (void)URLSession:(NSURLSession *)session didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition disposition, NSURLCredential * _Nullable credential))completionHandler
+{
+  BOOL insecure = AutoGLMParseBool(self.config[kAutoGLMInsecureSkipTLSVerifyKey], NO);
+  if (!insecure) {
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+    return;
+  }
+  SecTrustRef trust = challenge.protectionSpace.serverTrust;
+  if (trust != NULL) {
+    NSURLCredential *cred = [NSURLCredential credentialForTrust:trust];
+    completionHandler(NSURLSessionAuthChallengeUseCredential, cred);
+    return;
+  }
+  completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
+
+@end
+
+@interface AutoGLMOnDeviceAgentManager : NSObject
+@property (nonatomic, strong) dispatch_queue_t stateQueue;
+@property (nonatomic, strong) NSMutableArray<NSString *> *logLines;
+@property (nonatomic, strong) NSMutableDictionary *config;
+@property (nonatomic, strong) AutoGLMOnDeviceAgent *agent;
+@property (nonatomic, assign) BOOL running;
+@property (nonatomic, copy) NSString *lastMessage;
+@end
+
+@implementation AutoGLMOnDeviceAgentManager
+
++ (instancetype)shared
+{
+  static AutoGLMOnDeviceAgentManager *inst = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    inst = [AutoGLMOnDeviceAgentManager new];
+  });
+  return inst;
+}
+
+- (instancetype)init
+{
+  self = [super init];
+  if (!self) {
+    return nil;
+  }
+  _stateQueue = dispatch_queue_create("autoglm.on_device_agent.state", DISPATCH_QUEUE_SERIAL);
+  _logLines = [NSMutableArray array];
+  _config = [NSMutableDictionary dictionary];
+  _running = NO;
+  _lastMessage = @"";
+
+  [self loadConfigFromDefaults];
+  return self;
+}
+
+- (void)appendLog:(NSString *)line
+{
+  dispatch_async(self.stateQueue, ^{
+    [self.logLines addObject:line ?: @""];
+    while (self.logLines.count > 300) {
+      [self.logLines removeObjectAtIndex:0];
+    }
+  });
+  [FBLogger log:line ?: @""];
+}
+
+- (void)loadConfigFromDefaults
+{
+  NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+  NSString *task = [d stringForKey:kAutoGLMTaskKey] ?: @"";
+  NSString *baseURL = [d stringForKey:kAutoGLMBaseURLKey] ?: @"";
+  NSString *model = [d stringForKey:kAutoGLMModelKey] ?: @"";
+  NSString *apiKey = @"";
+  BOOL remember = [d boolForKey:kAutoGLMRememberApiKeyKey];
+  if (remember) {
+    apiKey = [d stringForKey:kAutoGLMApiKeyKey] ?: @"";
+  }
+
+  NSInteger maxSteps = (NSInteger)[d integerForKey:kAutoGLMMaxStepsKey];
+  double timeout = [d doubleForKey:kAutoGLMTimeoutSecondsKey];
+  double stepDelay = [d doubleForKey:kAutoGLMStepDelaySecondsKey];
+  BOOL insecure = [d boolForKey:kAutoGLMInsecureSkipTLSVerifyKey];
+  id dbgObj = [d objectForKey:kAutoGLMDebugLogRawAssistantKey];
+  BOOL debugRaw = (dbgObj == nil) ? YES : [d boolForKey:kAutoGLMDebugLogRawAssistantKey];
+
+  if (maxSteps <= 0) {
+    maxSteps = 30;
+  }
+  if (timeout <= 0) {
+    timeout = 90.0;
+  }
+  if (stepDelay <= 0) {
+    stepDelay = 0.5;
+  }
+
+  self.config[kAutoGLMTaskKey] = task;
+  self.config[kAutoGLMBaseURLKey] = baseURL;
+  self.config[kAutoGLMModelKey] = model;
+  self.config[kAutoGLMApiKeyKey] = apiKey;
+  self.config[kAutoGLMRememberApiKeyKey] = @(remember);
+  self.config[kAutoGLMMaxStepsKey] = @(maxSteps);
+  self.config[kAutoGLMTimeoutSecondsKey] = @(timeout);
+  self.config[kAutoGLMStepDelaySecondsKey] = @(stepDelay);
+  self.config[kAutoGLMInsecureSkipTLSVerifyKey] = @(insecure);
+  self.config[kAutoGLMDebugLogRawAssistantKey] = @(debugRaw);
+}
+
+- (void)persistConfigToDefaults
+{
+  NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+  [d setObject:AutoGLMTrim(AutoGLMStringOrEmpty(self.config[kAutoGLMTaskKey])) forKey:kAutoGLMTaskKey];
+  [d setObject:AutoGLMTrim(AutoGLMStringOrEmpty(self.config[kAutoGLMBaseURLKey])) forKey:kAutoGLMBaseURLKey];
+  [d setObject:AutoGLMTrim(AutoGLMStringOrEmpty(self.config[kAutoGLMModelKey])) forKey:kAutoGLMModelKey];
+
+  BOOL remember = AutoGLMParseBool(self.config[kAutoGLMRememberApiKeyKey], NO);
+  [d setBool:remember forKey:kAutoGLMRememberApiKeyKey];
+  if (remember) {
+    [d setObject:AutoGLMTrim(AutoGLMStringOrEmpty(self.config[kAutoGLMApiKeyKey])) forKey:kAutoGLMApiKeyKey];
+  } else {
+    [d removeObjectForKey:kAutoGLMApiKeyKey];
+  }
+
+  [d setInteger:AutoGLMParseInt(self.config[kAutoGLMMaxStepsKey], 30) forKey:kAutoGLMMaxStepsKey];
+  [d setDouble:AutoGLMParseDouble(self.config[kAutoGLMTimeoutSecondsKey], 90.0) forKey:kAutoGLMTimeoutSecondsKey];
+  [d setDouble:AutoGLMParseDouble(self.config[kAutoGLMStepDelaySecondsKey], 0.5) forKey:kAutoGLMStepDelaySecondsKey];
+  [d setBool:AutoGLMParseBool(self.config[kAutoGLMInsecureSkipTLSVerifyKey], NO) forKey:kAutoGLMInsecureSkipTLSVerifyKey];
+  [d setBool:AutoGLMParseBool(self.config[kAutoGLMDebugLogRawAssistantKey], YES) forKey:kAutoGLMDebugLogRawAssistantKey];
+  [d synchronize];
+}
+
+- (void)updateConfigWithArguments:(NSDictionary *)args
+{
+  NSString *task = AutoGLMStringOrEmpty(args[@"task"]);
+  NSString *baseURL = AutoGLMStringOrEmpty(args[@"base_url"]);
+  NSString *model = AutoGLMStringOrEmpty(args[@"model"]);
+  NSString *apiKey = AutoGLMNormalizeApiKey(AutoGLMStringOrEmpty(args[@"api_key"]));
+
+  if (task.length > 0) {
+    self.config[kAutoGLMTaskKey] = task;
+  }
+  if (baseURL.length > 0) {
+    self.config[kAutoGLMBaseURLKey] = baseURL;
+  }
+  if (model.length > 0) {
+    self.config[kAutoGLMModelKey] = model;
+  }
+  if (apiKey.length > 0 || [args objectForKey:@"api_key"] != nil) {
+    self.config[kAutoGLMApiKeyKey] = apiKey;
+  }
+
+  if ([args objectForKey:@"remember_api_key"] != nil) {
+    self.config[kAutoGLMRememberApiKeyKey] = @(AutoGLMParseBool(args[@"remember_api_key"], NO));
+  }
+  if ([args objectForKey:@"max_steps"] != nil) {
+    self.config[kAutoGLMMaxStepsKey] = @(AutoGLMParseInt(args[@"max_steps"], 30));
+  }
+  if ([args objectForKey:@"timeout_seconds"] != nil) {
+    self.config[kAutoGLMTimeoutSecondsKey] = @(AutoGLMParseDouble(args[@"timeout_seconds"], 90.0));
+  }
+  if ([args objectForKey:@"step_delay_seconds"] != nil) {
+    self.config[kAutoGLMStepDelaySecondsKey] = @(AutoGLMParseDouble(args[@"step_delay_seconds"], 0.5));
+  }
+  if ([args objectForKey:@"insecure_skip_tls_verify"] != nil) {
+    self.config[kAutoGLMInsecureSkipTLSVerifyKey] = @(AutoGLMParseBool(args[@"insecure_skip_tls_verify"], NO));
+  }
+  if ([args objectForKey:@"debug_log_raw_assistant"] != nil) {
+    self.config[kAutoGLMDebugLogRawAssistantKey] = @(AutoGLMParseBool(args[@"debug_log_raw_assistant"], YES));
+  }
+
+  [self persistConfigToDefaults];
+}
+
+- (NSDictionary *)safeConfigSnapshot
+{
+  NSMutableDictionary *cfg = [NSMutableDictionary dictionary];
+  cfg[@"task"] = AutoGLMStringOrEmpty(self.config[kAutoGLMTaskKey]);
+  cfg[@"base_url"] = AutoGLMStringOrEmpty(self.config[kAutoGLMBaseURLKey]);
+  cfg[@"model"] = AutoGLMStringOrEmpty(self.config[kAutoGLMModelKey]);
+
+  BOOL remember = AutoGLMParseBool(self.config[kAutoGLMRememberApiKeyKey], NO);
+  NSString *apiKey = AutoGLMStringOrEmpty(self.config[kAutoGLMApiKeyKey]);
+  cfg[@"api_key_set"] = @(apiKey.length > 0);
+  cfg[@"remember_api_key"] = @(remember);
+
+  cfg[@"max_steps"] = @(AutoGLMParseInt(self.config[kAutoGLMMaxStepsKey], 30));
+  cfg[@"timeout_seconds"] = @(AutoGLMParseDouble(self.config[kAutoGLMTimeoutSecondsKey], 90.0));
+  cfg[@"step_delay_seconds"] = @(AutoGLMParseDouble(self.config[kAutoGLMStepDelaySecondsKey], 0.5));
+  cfg[@"insecure_skip_tls_verify"] = @(AutoGLMParseBool(self.config[kAutoGLMInsecureSkipTLSVerifyKey], NO));
+  cfg[@"debug_log_raw_assistant"] = @(AutoGLMParseBool(self.config[kAutoGLMDebugLogRawAssistantKey], YES));
+  return cfg.copy;
+}
+
+- (NSDictionary *)status
+{
+  __block NSDictionary *st = nil;
+  dispatch_sync(self.stateQueue, ^{
+    st = @{
+      @"running": @(self.running),
+      @"last_message": self.lastMessage ?: @"",
+      @"config": [self safeConfigSnapshot],
+      @"log_lines": @(self.logLines.count),
+    };
+  });
+  return st ?: @{};
+}
+
+- (NSArray<NSString *> *)logs
+{
+  __block NSArray<NSString *> *lines = nil;
+  dispatch_sync(self.stateQueue, ^{
+    lines = self.logLines.copy;
+  });
+  return lines ?: @[];
+}
+
+- (BOOL)isConfigValid:(NSDictionary *)cfg message:(NSString **)message
+{
+  NSString *task = AutoGLMTrim(AutoGLMStringOrEmpty(cfg[kAutoGLMTaskKey]));
+  NSString *baseURL = AutoGLMTrim(AutoGLMStringOrEmpty(cfg[kAutoGLMBaseURLKey]));
+  NSString *model = AutoGLMTrim(AutoGLMStringOrEmpty(cfg[kAutoGLMModelKey]));
+  if (task.length == 0 || baseURL.length == 0 || model.length == 0) {
+    if (message) {
+      *message = @"Missing task/base_url/model";
+    }
+    return NO;
+  }
+  return YES;
+}
+
+- (BOOL)startWithArguments:(NSDictionary *)args error:(NSError **)error
+{
+  __block BOOL ok = YES;
+  __block NSError *err = nil;
+
+  dispatch_sync(self.stateQueue, ^{
+    [self updateConfigWithArguments:args ?: @{}];
+
+    if (self.running) {
+      ok = NO;
+      err = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:20 userInfo:@{NSLocalizedDescriptionKey: @"Already running"}];
+      return;
+    }
+
+    NSString *msg = nil;
+    if (![self isConfigValid:self.config message:&msg]) {
+      ok = NO;
+      err = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:21 userInfo:@{NSLocalizedDescriptionKey: msg ?: @"Invalid config"}];
+      return;
+    }
+
+    self.running = YES;
+    self.lastMessage = @"Started";
+
+    __weak __typeof(self) weakSelf = self;
+    AutoGLMLogBlock log = ^(NSString *line) {
+      __strong __typeof(weakSelf) strongSelf = weakSelf;
+      if (strongSelf == nil) {
+        return;
+      }
+      [strongSelf appendLog:line];
+    };
+    AutoGLMFinishBlock finish = ^(BOOL success, NSString *message) {
+      __strong __typeof(weakSelf) strongSelf = weakSelf;
+      if (strongSelf == nil) {
+        return;
+      }
+      NSString *finalMessage = message ?: (success ? @"Finished" : @"Stopped");
+      NSString *line = [NSString stringWithFormat:@"%@ [AUTOGLM] %@", AutoGLMNowString(), finalMessage];
+      [strongSelf appendLog:line];
+      dispatch_async(strongSelf.stateQueue, ^{
+        strongSelf.running = NO;
+        strongSelf.lastMessage = finalMessage;
+        strongSelf.agent = nil;
+      });
+    };
+
+    self.agent = [[AutoGLMOnDeviceAgent alloc] initWithConfig:self.config log:log finish:finish];
+    [self appendLog:@"[AUTOGLM] Agent created. Running..."];
+    [self.agent start];
+  });
+
+  if (!ok && error) {
+    *error = err;
+  }
+  return ok;
+}
+
+- (void)stop
+{
+  dispatch_async(self.stateQueue, ^{
+    if (!self.running || self.agent == nil) {
+      self.lastMessage = @"Not running";
+      return;
+    }
+    self.lastMessage = @"Stopping...";
+    [self.agent requestStop];
+  });
+}
+
+@end
+
+static NSString *AutoGLMAgentPageHTML(void)
+{
+  return
+  @"<!doctype html>\n"
+  @"<html>\n"
+  @"<head>\n"
+  @"  <meta charset=\"utf-8\" />\n"
+  @"  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
+  @"  <title>AutoGLM On‑Device Agent</title>\n"
+  @"  <style>\n"
+  @"    :root{color-scheme:light dark;--bg:#fff;--fg:#111;--muted:#666;--card:#f6f6f6;--border:#ccc;--primary:#0a84ff;--danger:#ff3b30;--radius:12px;}\n"
+  @"    @media (prefers-color-scheme: dark){:root{--bg:#0b0b0c;--fg:#f2f2f2;--muted:#b0b0b0;--card:#1c1c1e;--border:#3a3a3c;--primary:#0a84ff;--danger:#ff453a;}}\n"
+  @"    html,body{height:100%;}\n"
+  @"    body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:16px;padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));padding-top:max(16px,env(safe-area-inset-top));padding-bottom:max(16px,env(safe-area-inset-bottom));}\n"
+  @"    .container{max-width:900px;margin:0 auto;}\n"
+  @"    h2{margin:0 0 8px 0;font-size:20px;}\n"
+  @"    h3{margin:16px 0 8px 0;font-size:16px;}\n"
+  @"    label{display:block;margin-top:12px;font-weight:600;}\n"
+  @"    input,textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:10px;box-sizing:border-box;font-family:inherit;font-size:16px;background:transparent;color:inherit;}\n"
+  @"    textarea{min-height:120px;resize:vertical;}\n"
+  @"    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,\"Liberation Mono\",\"Courier New\",monospace;}\n"
+  @"    .row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}\n"
+  @"    @media (max-width: 680px){.row{grid-template-columns:1fr;}}\n"
+  @"    .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;}\n"
+  @"    button{min-height:44px;padding:10px 14px;border:0;border-radius:12px;flex:1 1 120px;}\n"
+  @"    .primary{background:var(--primary);color:#fff;}\n"
+  @"    .danger{background:var(--danger);color:#fff;}\n"
+  @"    .ghost{background:var(--card);color:inherit;border:1px solid var(--border);}\n"
+  @"    .muted{color:var(--muted);font-size:13px;line-height:1.45;}\n"
+  @"    .check{display:flex;align-items:center;gap:10px;margin-top:10px;user-select:none;}\n"
+  @"    .check input{width:auto;transform:scale(1.15);}\n"
+  @"    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,\"Liberation Mono\",\"Courier New\",monospace;font-size:13px;background:var(--card);padding:2px 6px;border-radius:8px;overflow-wrap:anywhere;}\n"
+  @"    pre{background:var(--card);border:1px solid var(--border);padding:10px;border-radius:var(--radius);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:40vh;overflow:auto;-webkit-overflow-scrolling:touch;font-size:12px;line-height:1.35;}\n"
+  @"  </style>\n"
+  @"</head>\n"
+  @"<body>\n"
+  @"  <div class=\"container\">\n"
+  @"    <h2>AutoGLM On‑Device Agent (WDA Runner)</h2>\n"
+  @"    <div class=\"muted\">\n"
+  @"      This page configures and starts an agent running <b>inside</b> WebDriverAgentRunner (XCTest).\n"
+  @"      If LAN access fails, try opening this page with <code>http://127.0.0.1:8100/autoglm</code> on the iPhone.\n"
+  @"    </div>\n"
+  @"    <label>Base URL (OpenAI-compatible)</label>\n"
+  @"    <input id=\"base_url\" class=\"mono\" placeholder=\"https://...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" />\n"
+  @"    <label>Model</label>\n"
+  @"    <input id=\"model\" class=\"mono\" placeholder=\"gpt-4o-mini / ...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" />\n"
+  @"    <label>API Key</label>\n"
+  @"    <input id=\"api_key\" class=\"mono\" type=\"password\" placeholder=\"sk-...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" autocomplete=\"off\" />\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"show_api_key\" /> <span>Show API key</span></label>\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"remember_api_key\" /> <span>Remember API key on device (NOT recommended for shared devices)</span></label>\n"
+  @"    <label>Task</label>\n"
+  @"    <textarea id=\"task\" placeholder=\"Describe what to do... (e.g., open Xiaohongshu and ...)\"></textarea>\n"
+  @"    <div class=\"row\">\n"
+  @"      <div>\n"
+  @"        <label>Max Steps</label>\n"
+  @"        <input id=\"max_steps\" placeholder=\"30\" inputmode=\"numeric\" />\n"
+  @"      </div>\n"
+  @"      <div>\n"
+  @"        <label>Timeout (seconds)</label>\n"
+  @"        <input id=\"timeout_seconds\" placeholder=\"90\" inputmode=\"numeric\" />\n"
+  @"      </div>\n"
+  @"      <div>\n"
+  @"        <label>Step Delay (seconds)</label>\n"
+  @"        <input id=\"step_delay_seconds\" placeholder=\"0.5\" inputmode=\"decimal\" />\n"
+  @"      </div>\n"
+  @"    </div>\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"insecure_skip_tls_verify\" /> <span>Insecure: skip TLS verify (debug only)</span></label>\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"debug_log_raw_assistant\" /> <span>Debug: log raw assistant message (may contain sensitive info)</span></label>\n"
+  @"    <div class=\"actions\">\n"
+  @"      <button class=\"primary\" onclick=\"saveCfg()\">Save</button>\n"
+  @"      <button class=\"primary\" onclick=\"start()\">Start</button>\n"
+  @"      <button class=\"danger\" onclick=\"stop()\">Stop</button>\n"
+  @"      <button class=\"ghost\" onclick=\"refresh()\">Refresh</button>\n"
+  @"    </div>\n"
+  @"    <h3>Status</h3>\n"
+  @"    <pre id=\"status\">Loading...</pre>\n"
+  @"    <h3>Logs</h3>\n"
+  @"    <pre id=\"logs\">(empty)</pre>\n"
+  @"  </div>\n"
+  @"  <script>\n"
+  @"    let dirty = false;\n"
+  @"    let composing = false;\n"
+  @"    function isEditing(){\n"
+  @"      const el = document.activeElement;\n"
+  @"      if (!el || !el.tagName) return false;\n"
+  @"      const tag = el.tagName.toLowerCase();\n"
+  @"      return tag === 'input' || tag === 'textarea';\n"
+  @"    }\n"
+  @"    function markDirty(){ dirty = true; }\n"
+  @"    function initDirtyTracking(){\n"
+  @"      const ids = ['base_url','model','api_key','task','max_steps','timeout_seconds','step_delay_seconds'];\n"
+  @"      for (const id of ids){\n"
+  @"        const el = document.getElementById(id);\n"
+  @"        if (!el) continue;\n"
+  @"        el.addEventListener('input', markDirty);\n"
+  @"        el.addEventListener('change', markDirty);\n"
+  @"        el.addEventListener('compositionstart', () => { composing = true; });\n"
+  @"        el.addEventListener('compositionend', () => { composing = false; markDirty(); });\n"
+  @"      }\n"
+  @"      const cbs = ['remember_api_key','insecure_skip_tls_verify','debug_log_raw_assistant'];\n"
+  @"      for (const id of cbs){\n"
+  @"        const el = document.getElementById(id);\n"
+  @"        if (!el) continue;\n"
+  @"        el.addEventListener('change', markDirty);\n"
+  @"      }\n"
+  @"      const show = document.getElementById('show_api_key');\n"
+  @"      if (show) {\n"
+  @"        show.addEventListener('change', () => {\n"
+  @"          const keyEl = document.getElementById('api_key');\n"
+  @"          if (!keyEl) return;\n"
+  @"          keyEl.type = show.checked ? 'text' : 'password';\n"
+  @"        });\n"
+  @"      }\n"
+  @"    }\n"
+  @"    async function commitIME(){\n"
+  @"      // iOS Safari IME (e.g. Chinese) may not commit the last composed character before click handlers read input.value.\n"
+  @"      if (isEditing() && document.activeElement) {\n"
+  @"        try { document.activeElement.blur(); } catch (e) {}\n"
+  @"        await new Promise(r => setTimeout(r, 50));\n"
+  @"      }\n"
+  @"      if (composing) {\n"
+  @"        await new Promise(r => setTimeout(r, 50));\n"
+  @"      }\n"
+  @"    }\n"
+  @"    async function api(path, method, body){\n"
+  @"      const opts = {method: method || 'GET'};\n"
+  @"      if (body){ opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify(body); }\n"
+  @"      const r = await fetch(path, opts);\n"
+  @"      const j = await r.json();\n"
+  @"      return j.value || {};\n"
+  @"    }\n"
+  @"    function cfgFromUI(){\n"
+  @"      const cfg = {\n"
+  @"        base_url: document.getElementById('base_url').value,\n"
+  @"        model: document.getElementById('model').value,\n"
+  @"        remember_api_key: document.getElementById('remember_api_key').checked,\n"
+  @"        debug_log_raw_assistant: document.getElementById('debug_log_raw_assistant').checked,\n"
+  @"        task: document.getElementById('task').value,\n"
+  @"        max_steps: document.getElementById('max_steps').value,\n"
+  @"        timeout_seconds: document.getElementById('timeout_seconds').value,\n"
+  @"        step_delay_seconds: document.getElementById('step_delay_seconds').value,\n"
+  @"        insecure_skip_tls_verify: document.getElementById('insecure_skip_tls_verify').checked,\n"
+  @"      };\n"
+  @"      const key = (document.getElementById('api_key').value || '').trim();\n"
+  @"      if (key.length > 0) { cfg.api_key = key; }\n"
+  @"      return cfg;\n"
+  @"    }\n"
+  @"    function fillUI(cfg){\n"
+  @"      document.getElementById('base_url').value = cfg.base_url || '';\n"
+  @"      document.getElementById('model').value = cfg.model || '';\n"
+  @"      document.getElementById('task').value = cfg.task || '';\n"
+  @"      document.getElementById('max_steps').value = cfg.max_steps || 30;\n"
+  @"      document.getElementById('timeout_seconds').value = cfg.timeout_seconds || 90;\n"
+  @"      document.getElementById('step_delay_seconds').value = cfg.step_delay_seconds || 0.5;\n"
+  @"      document.getElementById('remember_api_key').checked = !!cfg.remember_api_key;\n"
+  @"      document.getElementById('insecure_skip_tls_verify').checked = !!cfg.insecure_skip_tls_verify;\n"
+  @"      document.getElementById('debug_log_raw_assistant').checked = (cfg.debug_log_raw_assistant !== false);\n"
+  @"      if (cfg.api_key_set) {\n"
+  @"        document.getElementById('api_key').placeholder = '(set)';\n"
+  @"      }\n"
+  @"    }\n"
+  @"    async function refresh(){\n"
+  @"      const st = await api('/autoglm/status');\n"
+  @"      document.getElementById('status').textContent = JSON.stringify(st, null, 2);\n"
+  @"      if (!dirty && !isEditing()) {\n"
+  @"        fillUI((st.config)||{});\n"
+  @"      }\n"
+  @"      const logs = await api('/autoglm/logs');\n"
+  @"      document.getElementById('logs').textContent = (logs.lines||[]).join('\\n');\n"
+  @"    }\n"
+  @"    async function saveCfg(){\n"
+  @"      await commitIME();\n"
+  @"      await api('/autoglm/config', 'POST', cfgFromUI());\n"
+  @"      dirty = false;\n"
+  @"      await refresh();\n"
+  @"    }\n"
+  @"    async function start(){\n"
+  @"      await commitIME();\n"
+  @"      await api('/autoglm/start', 'POST', cfgFromUI());\n"
+  @"      dirty = false;\n"
+  @"      await refresh();\n"
+  @"    }\n"
+  @"    async function stop(){\n"
+  @"      await api('/autoglm/stop', 'POST');\n"
+  @"      await refresh();\n"
+  @"    }\n"
+  @"    initDirtyTracking();\n"
+  @"    refresh();\n"
+  @"    setInterval(refresh, 1500);\n"
+  @"  </script>\n"
+  @"</body>\n"
+  @"</html>\n";
+}
+
+@interface FBAutoGLMCommands : NSObject <FBCommandHandler>
+@end
+
+@implementation FBAutoGLMCommands
+
++ (NSArray *)routes
+{
+  return @[
+    [[FBRoute GET:@"/autoglm"].withoutSession respondWithTarget:self action:@selector(handleGetPage:)],
+    [[FBRoute GET:@"/autoglm/status"].withoutSession respondWithTarget:self action:@selector(handleGetStatus:)],
+    [[FBRoute GET:@"/autoglm/logs"].withoutSession respondWithTarget:self action:@selector(handleGetLogs:)],
+    [[FBRoute POST:@"/autoglm/config"].withoutSession respondWithTarget:self action:@selector(handlePostConfig:)],
+    [[FBRoute POST:@"/autoglm/start"].withoutSession respondWithTarget:self action:@selector(handlePostStart:)],
+    [[FBRoute POST:@"/autoglm/stop"].withoutSession respondWithTarget:self action:@selector(handlePostStop:)],
+  ];
+}
+
++ (id<FBResponsePayload>)handleGetPage:(FBRouteRequest *)request
+{
+  return [[AutoGLMTextPayload alloc] initWithText:AutoGLMAgentPageHTML()
+                                     contentType:@"text/html;charset=UTF-8"
+                                      statusCode:kHTTPStatusCodeOK];
+}
+
++ (id<FBResponsePayload>)handleGetStatus:(FBRouteRequest *)request
+{
+  return FBResponseWithObject([[AutoGLMOnDeviceAgentManager shared] status]);
+}
+
++ (id<FBResponsePayload>)handleGetLogs:(FBRouteRequest *)request
+{
+  return FBResponseWithObject(@{@"lines": [[AutoGLMOnDeviceAgentManager shared] logs]});
+}
+
++ (id<FBResponsePayload>)handlePostConfig:(FBRouteRequest *)request
+{
+  dispatch_sync([AutoGLMOnDeviceAgentManager shared].stateQueue, ^{
+    [[AutoGLMOnDeviceAgentManager shared] updateConfigWithArguments:request.arguments ?: @{}];
+  });
+  return FBResponseWithObject([[AutoGLMOnDeviceAgentManager shared] status]);
+}
+
++ (id<FBResponsePayload>)handlePostStart:(FBRouteRequest *)request
+{
+  NSError *err = nil;
+  if (![[AutoGLMOnDeviceAgentManager shared] startWithArguments:request.arguments ?: @{} error:&err]) {
+    return FBResponseWithObject(@{@"ok": @NO, @"error": err.localizedDescription ?: @"start failed", @"status": [[AutoGLMOnDeviceAgentManager shared] status]});
+  }
+  return FBResponseWithObject(@{@"ok": @YES, @"status": [[AutoGLMOnDeviceAgentManager shared] status]});
+}
+
++ (id<FBResponsePayload>)handlePostStop:(FBRouteRequest *)request
+{
+  [[AutoGLMOnDeviceAgentManager shared] stop];
+  return FBResponseWithObject([[AutoGLMOnDeviceAgentManager shared] status]);
+}
+
+@end
+
+@interface UITestingUITests : FBFailureProofTestCase <FBWebServerDelegate>
+@end
+
+@implementation UITestingUITests
+
++ (void)setUp
+{
+  [FBDebugLogDelegateDecorator decorateXCTestLogger];
+  [FBConfiguration disableRemoteQueryEvaluation];
+  [FBConfiguration configureDefaultKeyboardPreferences];
+  [FBConfiguration disableApplicationUIInterruptionsHandling];
+  if (NSProcessInfo.processInfo.environment[@"ENABLE_AUTOMATIC_SCREEN_RECORDINGS"]) {
+    [FBConfiguration enableScreenRecordings];
+  } else {
+    [FBConfiguration disableScreenRecordings];
+  }
+  if (NSProcessInfo.processInfo.environment[@"ENABLE_AUTOMATIC_SCREENSHOTS"]) {
+    [FBConfiguration enableScreenshots];
+  } else {
+    [FBConfiguration disableScreenshots];
+  }
+  [super setUp];
+}
+
+/**
+ Never ending test used to start WebDriverAgent
+ */
+- (void)testRunner
+{
+  FBWebServer *webServer = [[FBWebServer alloc] init];
+  webServer.delegate = self;
+  [webServer startServing];
+}
+
+#pragma mark - FBWebServerDelegate
+
+- (void)webServerDidRequestShutdown:(FBWebServer *)webServer
+{
+  [webServer stopServing];
+}
+
+@end

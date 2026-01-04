@@ -1,0 +1,118 @@
+"""iOS PhoneAgent class for orchestrating iOS phone automation."""
+
+from dataclasses import dataclass
+from typing import Callable
+
+from phone_agent.ios.action_handler import IOSActionHandler
+from phone_agent.agent_base import BaseAgentConfig, BasePhoneAgent, StepResult
+from phone_agent.model import ModelConfig
+from phone_agent.ios.wda import WDAConnection, get_current_app, get_screenshot
+from phone_agent.ios.wda.wda_client import WDAClient
+
+
+@dataclass
+class IOSAgentConfig(BaseAgentConfig):
+    """Configuration for the iOS PhoneAgent."""
+
+    wda_url: str = "http://localhost:8100"
+    session_id: str | None = None
+    scale_factor: float | None = None
+    verify_tls: bool = True
+
+
+class IOSPhoneAgent(BasePhoneAgent):
+    """
+    AI-powered agent for automating iOS phone interactions.
+
+    The agent uses a vision-language model to understand screen content
+    and decide on actions to complete user tasks via WebDriverAgent.
+
+    Args:
+        model_config: Configuration for the AI model.
+        agent_config: Configuration for the iOS agent behavior.
+        confirmation_callback: Optional callback for sensitive action confirmation.
+        takeover_callback: Optional callback for takeover requests.
+
+    Example:
+        >>> from phone_agent.ios import IOSPhoneAgent, IOSAgentConfig
+        >>> from phone_agent.model import ModelConfig
+        >>>
+        >>> model_config = ModelConfig(base_url="http://localhost:8000/v1")
+        >>> agent_config = IOSAgentConfig(wda_url="http://localhost:8100")
+        >>> agent = IOSPhoneAgent(model_config, agent_config)
+        >>> agent.run("Open Safari and search for Apple")
+    """
+
+    def __init__(
+        self,
+        model_config: ModelConfig | None = None,
+        agent_config: IOSAgentConfig | None = None,
+        confirmation_callback: Callable[[str], bool] | None = None,
+        takeover_callback: Callable[[str], None] | None = None,
+    ):
+        resolved_model_config = model_config or ModelConfig()
+        resolved_agent_config = agent_config or IOSAgentConfig()
+
+        # Initialize WDA connection and create session if needed
+        self.wda_connection = WDAConnection(
+            wda_url=resolved_agent_config.wda_url, verify_tls=resolved_agent_config.verify_tls
+        )
+
+        # Auto-create session if not provided
+        if resolved_agent_config.session_id is None:
+            success, result = self.wda_connection.start_wda_session()
+            session_id = result if success and result != "session_started" else None
+
+            if session_id:
+                resolved_agent_config.session_id = session_id
+                if resolved_agent_config.verbose:
+                    print(f"✅ Created WDA session: {session_id}")
+            else:
+                existing_sessions = self.wda_connection.list_wda_sessions()
+                session_id = existing_sessions[0] if existing_sessions else None
+
+                if session_id:
+                    resolved_agent_config.session_id = session_id
+                    if resolved_agent_config.verbose:
+                        if success:
+                            print(f"✅ Using detected WDA session: {session_id}")
+                        else:
+                            print(
+                                f"⚠️  Failed to create WDA session; reusing existing session: {session_id}"
+                            )
+                else:
+                    error = result if not success else "WDA did not return a session id"
+                    raise RuntimeError(
+                        f"{error}. Please restart WebDriverAgent and try again."
+                    )
+
+        action_handler = IOSActionHandler(
+            wda_url=resolved_agent_config.wda_url,
+            session_id=resolved_agent_config.session_id,
+            scale_factor=resolved_agent_config.scale_factor,
+            verify_tls=resolved_agent_config.verify_tls,
+            confirmation_callback=confirmation_callback,
+            takeover_callback=takeover_callback,
+        )
+
+        wda_client = WDAClient(
+            resolved_agent_config.wda_url,
+            session_id=resolved_agent_config.session_id,
+            verify_tls=resolved_agent_config.verify_tls,
+        )
+
+        super().__init__(
+            model_config=resolved_model_config,
+            agent_config=resolved_agent_config,
+            action_handler=action_handler,
+            get_screenshot=lambda: get_screenshot(
+                wda_url=resolved_agent_config.wda_url,
+                session_id=resolved_agent_config.session_id,
+                client=wda_client,
+            ),
+            get_current_app=lambda: get_current_app(
+                wda_url=resolved_agent_config.wda_url,
+                session_id=resolved_agent_config.session_id,
+                client=wda_client,
+            ),
+        )

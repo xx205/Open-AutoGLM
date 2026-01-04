@@ -34,6 +34,7 @@ static NSString *const kAutoGLMTimeoutSecondsKey = @"AUTOGLM_TIMEOUT_SECONDS";
 static NSString *const kAutoGLMStepDelaySecondsKey = @"AUTOGLM_STEP_DELAY_SECONDS";
 static NSString *const kAutoGLMInsecureSkipTLSVerifyKey = @"AUTOGLM_INSECURE_SKIP_TLS_VERIFY";
 static NSString *const kAutoGLMRememberApiKeyKey = @"AUTOGLM_REMEMBER_API_KEY";
+static NSString *const kAutoGLMDebugLogRawAssistantKey = @"AUTOGLM_DEBUG_LOG_RAW_ASSISTANT";
 
 static BOOL AutoGLMParseBool(id value, BOOL defaultValue)
 {
@@ -563,6 +564,7 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
 @property (nonatomic, copy) AutoGLMFinishBlock finish;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *context;
+@property (nonatomic, copy) NSArray<NSDictionary *> *planChecklist;
 @end
 
 @implementation AutoGLMOnDeviceAgent
@@ -577,6 +579,7 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   _log = [log copy];
   _finish = [finish copy];
   _stopRequested = NO;
+  _planChecklist = @[];
 
   NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
   cfg.timeoutIntervalForRequest = AutoGLMParseDouble(config[kAutoGLMTimeoutSecondsKey], 90.0);
@@ -598,21 +601,19 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
 {
   NSString *date = AutoGLMFormattedDateZH();
 
-  return [NSString stringWithFormat:
-    @"今天的日期是: %@\n"
-    @"你是一个智能体分析专家，可以根据操作历史和当前状态图执行一系列操作来完成任务。\n"
-    @"你必须严格按照要求输出以下格式：\n"
-    @"<think>{think}</think>\n"
-    @"<answer>{action}</answer>\n"
-    @"\n"
-    @"其中：\n"
-    @"- {think} 是对你为什么选择这个操作的简短推理说明。\n"
-    @"- {action} 是本次执行的具体操作指令，必须严格遵循下方定义的指令格式。\n"
-    @"\n"
-    @"注意：本项目使用 JSON action。你在 <answer> 中必须输出且只能输出 1 个 JSON 对象。\n"
-    @"兼容性要求：请在该 JSON 对象中额外包含一个字符串字段 \"think\"，用于填写你的简短推理说明（即使你已经输出了 <think> 标签）。\n"
-    @"\n"
-    @"操作指令及其作用如下：\n"
+	  return [NSString stringWithFormat:
+	    @"今天的日期是: %@\n"
+	    @"你是一个智能体分析专家，可以根据操作历史和当前状态图执行一系列操作来完成任务。\n"
+	    @"注意：本项目使用 JSON action。\n"
+	    @"你必须输出且只能输出 1 个合法的 JSON 对象。\n"
+	    @"要求：该 JSON 必须包含键 \"think\"，用于填写你为什么选择这个操作的简短推理说明；以及键 \"action\"，用于填写本次执行的具体操作指令。\n"
+	    @"其中：\"action\" 必须是字符串（例如 \"Launch\" / \"Tap\" / \"Type\" / ...），不要把 \"action\" 输出为嵌套对象。\n"
+	    @"\n"
+	    @"你必须维护一个 checklist 计划（字段 \"plan\"），用于长期任务的分步执行与自我校验。\n"
+	    @"- 第 0 步：在 JSON 中包含 \"plan\"，它是一个数组，每个元素是一个对象：{\"text\": \"...\", \"done\": true/false}。\n"
+	    @"- 后续每一步：继续在 JSON 中包含 \"plan\"，并根据当前进度更新每个条目的 done 状态（必要时可以增删条目，但保持条目数量精简）。\n"
+	    @"\n"
+	    @"操作指令 action 的取值及其作用如下：\n"
     @"- {\"action\":\"Launch\",\"app\":\"xxx\"}\n"
     @"    Launch是启动目标app的操作，这比通过主屏幕导航更快。此操作完成后，您将自动收到结果状态的截图。\n"
     @"- {\"action\":\"Tap\",\"element\":[x,y]}\n"
@@ -646,6 +647,68 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
     @"- {\"action\":\"Finish\",\"message\":\"xxx\"}\n"
     @"    Finish是结束任务的操作，表示准确完整完成任务，message是终止信息。\n"
   , date];
+}
+
+- (NSArray<NSDictionary *> *)sanitizePlanChecklist:(id)planObj
+{
+  if (![planObj isKindOfClass:NSArray.class]) {
+    return nil;
+  }
+  NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+  for (id item in (NSArray *)planObj) {
+    if ([item isKindOfClass:NSString.class]) {
+      NSString *t = AutoGLMTrim((NSString *)item);
+      if (t.length == 0) {
+        continue;
+      }
+      [out addObject:@{@"text": t, @"done": @NO}];
+      continue;
+    }
+    if (![item isKindOfClass:NSDictionary.class]) {
+      continue;
+    }
+    NSDictionary *d = (NSDictionary *)item;
+    NSString *text = @"";
+    if ([d[@"text"] isKindOfClass:NSString.class]) {
+      text = AutoGLMTrim((NSString *)d[@"text"]);
+    } else if ([d[@"item"] isKindOfClass:NSString.class]) {
+      text = AutoGLMTrim((NSString *)d[@"item"]);
+    }
+    if (text.length == 0) {
+      continue;
+    }
+    BOOL done = AutoGLMParseBool(d[@"done"], NO);
+    [out addObject:@{@"text": text, @"done": @(done)}];
+  }
+
+  if (out.count == 0) {
+    return nil;
+  }
+  if (out.count > 12) {
+    return [out subarrayWithRange:NSMakeRange(0, 12)];
+  }
+  return out.copy;
+}
+
+- (NSString *)planChecklistText
+{
+  NSArray<NSDictionary *> *plan = self.planChecklist;
+  if (plan.count == 0) {
+    return @"";
+  }
+  NSMutableString *s = [NSMutableString string];
+  [s appendString:@"** Plan Checklist **\n"];
+  NSInteger idx = 1;
+  for (NSDictionary *it in plan) {
+    NSString *text = [it[@"text"] isKindOfClass:NSString.class] ? (NSString *)it[@"text"] : @"";
+    BOOL done = AutoGLMParseBool(it[@"done"], NO);
+    if (text.length == 0) {
+      continue;
+    }
+    [s appendFormat:@"%ld. [%@] %@\n", (long)idx, done ? @"x" : @" ", text];
+    idx += 1;
+  }
+  return s.copy;
 }
 
 - (NSURL *)chatCompletionsURL
@@ -781,6 +844,13 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
     return @"";
   }
 
+  // If the assistant starts directly with <answer>, there is no "thinking" text in content.
+  // (We may still have provider-specific reasoning fields handled separately.)
+  NSString *allTrimmed = AutoGLMTrim(text);
+  if ([allTrimmed hasPrefix:@"<answer>"]) {
+    return @"";
+  }
+
   // 1) Explicit <think>...</think>
   NSRange start = [text rangeOfString:@"<think>"];
   NSRange end = [text rangeOfString:@"</think>"];
@@ -844,7 +914,29 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   NSError *jsonErr = nil;
   id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
   if ([obj isKindOfClass:NSDictionary.class]) {
-    return (NSDictionary *)obj;
+    NSMutableDictionary *mut = [((NSDictionary *)obj) mutableCopy];
+    // Some models may mistakenly wrap the action payload as an object:
+    // {"think":"...","action":{"action":"Launch","app":"..."},"plan":[...]}
+    // Flatten it back to the expected shape: {"action":"Launch","app":"...","think":"...","plan":[...]}
+    id actionField = mut[@"action"];
+    if ([actionField isKindOfClass:NSDictionary.class]) {
+      NSDictionary *inner = (NSDictionary *)actionField;
+      id innerAction = inner[@"action"];
+      if ([innerAction isKindOfClass:NSString.class]) {
+        [mut removeObjectForKey:@"action"];
+        for (NSString *key in inner) {
+          if ([key isEqualToString:@"think"] || [key isEqualToString:@"plan"]) {
+            continue;
+          }
+          id v = inner[key];
+          if (v != nil) {
+            mut[key] = v;
+          }
+        }
+        mut[@"action"] = innerAction;
+      }
+    }
+    return mut.copy;
   }
 
   if (error) {
@@ -885,6 +977,17 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
     return acc.copy;
   }
   return nil;
+}
+
+- (NSDictionary *)messageFromOpenAIResponse:(NSDictionary *)json
+{
+  NSArray *choices = json[@"choices"];
+  if (![choices isKindOfClass:NSArray.class] || choices.count == 0) {
+    return nil;
+  }
+  NSDictionary *choice0 = choices.firstObject;
+  NSDictionary *message = [choice0 isKindOfClass:NSDictionary.class] ? choice0[@"message"] : nil;
+  return [message isKindOfClass:NSDictionary.class] ? message : nil;
 }
 
 - (NSString *)reasoningFromOpenAIResponse:(NSDictionary *)json
@@ -950,8 +1053,8 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   NSDictionary *body = @{
     @"model": AutoGLMStringOrEmpty(self.config[kAutoGLMModelKey]),
     @"messages": messages ?: @[],
-    @"temperature": @0,
-    @"max_tokens": @3000,
+    @"temperature": @1,
+    @"max_tokens": @32768,
   };
 
   NSData *payload = [NSJSONSerialization dataWithJSONObject:body options:0 error:error];
@@ -1282,7 +1385,12 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
     if (step == 0) {
       textContent = [NSString stringWithFormat:@"%@\n\n%@", task, screenInfo ?: @"{}"];
     } else {
-      textContent = [NSString stringWithFormat:@"** Screen Info **\n\n%@", screenInfo ?: @"{}"];
+      NSString *planText = [self planChecklistText];
+      if (planText.length > 0) {
+        textContent = [NSString stringWithFormat:@"%@\n\n** Screen Info **\n\n%@", planText, screenInfo ?: @"{}"];
+      } else {
+        textContent = [NSString stringWithFormat:@"** Screen Info **\n\n%@", screenInfo ?: @"{}"];
+      }
     }
 
     NSDictionary *userMessage = @{
@@ -1305,6 +1413,17 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
       return;
     }
 
+    BOOL debugRaw = AutoGLMParseBool(self.config[kAutoGLMDebugLogRawAssistantKey], YES);
+    if (debugRaw) {
+      NSDictionary *msg = [self messageFromOpenAIResponse:resp];
+      if (msg != nil) {
+        NSString *rawMsg = AutoGLMTruncate(AutoGLMJSONStringFromObject(msg), 2000);
+        if (rawMsg.length > 0) {
+          [self emit:[NSString stringWithFormat:@"[AUTOGLM] Raw assistant message (truncated): %@", rawMsg]];
+        }
+      }
+    }
+
     NSString *content = [self contentFromOpenAIResponse:resp];
     if (content.length == 0) {
       [self emit:@"[AUTOGLM] Empty model content."];
@@ -1314,14 +1433,15 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
       return;
     }
 
-    NSString *thinking = [self extractThinkingPayload:content];
-    if (thinking.length == 0) {
-      NSString *reasoning = [self reasoningFromOpenAIResponse:resp];
-      if (reasoning.length > 0) {
-        thinking = reasoning;
-      }
+    NSString *modelReasoning = [self reasoningFromOpenAIResponse:resp];
+    if (modelReasoning.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Model reasoning: %@", AutoGLMTruncate(modelReasoning, 800)]];
     }
-    if (thinking.length == 0) {
+
+    NSString *thinking = [self extractThinkingPayload:content];
+    if (thinking.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Thinking: %@", AutoGLMTruncate(thinking, 800)]];
+    } else if (modelReasoning.length == 0) {
       NSString *rawPreview = AutoGLMTruncate(AutoGLMTrim(content), 400);
       if (rawPreview.length > 0) {
         [self emit:[NSString stringWithFormat:@"[AUTOGLM] Raw model content (truncated): %@", rawPreview]];
@@ -1352,7 +1472,7 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
       NSString *fixText = [NSString stringWithFormat:
         @"你上一条输出无法解析为合法 JSON（错误：%@）。\n"
         @"请仅输出 1 个合法的 JSON 对象（不要输出任何多余文本、不要输出 <think>/<answer> 标签、不要输出代码块）。\n"
-        @"要求：该 JSON 必须包含键 \"action\"，并尽量保持与你上一条输出的意图一致；推理说明请放到字符串字段 \"think\"。\n"
+        @"要求：该 JSON 必须包含键 \"action\"，并尽量保持与你上一条输出的意图一致；推理说明请放到字符串字段 \"think\"；并继续包含/更新 checklist 字段 \"plan\"。\n"
         @"上一条输出如下：\n%@",
         errMsg,
         badOutput];
@@ -1391,11 +1511,15 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
       return;
     }
 
-    if (thinking.length == 0) {
-      thinking = [action[@"think"] isKindOfClass:NSString.class] ? action[@"think"] : @"";
+    NSArray<NSDictionary *> *newPlan = [self sanitizePlanChecklist:action[@"plan"]];
+    if (newPlan != nil) {
+      self.planChecklist = newPlan;
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Plan updated (%lu items)", (unsigned long)newPlan.count]];
     }
-    if (thinking.length > 0) {
-      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Thinking: %@", AutoGLMTruncate(thinking, 800)]];
+
+    NSString *actionThink = [action[@"think"] isKindOfClass:NSString.class] ? AutoGLMTrim((NSString *)action[@"think"]) : @"";
+    if (actionThink.length > 0) {
+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Action think: %@", AutoGLMTruncate(actionThink, 800)]];
     }
 
     NSString *actionName = [action[@"action"] isKindOfClass:NSString.class] ? AutoGLMNormalizeActionName((NSString *)action[@"action"]) : @"";
@@ -1420,14 +1544,9 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
       return;
     }
 
-    NSString *answerPayload = [self extractAnswerPayload:contentForParse];
-    NSString *assistantContent = nil;
-    if (answerPayload.length > 0) {
-      assistantContent = [NSString stringWithFormat:@"<think>%@</think><answer>%@</answer>", thinking ?: @"", answerPayload];
-    } else {
-      assistantContent = contentForParse;
-    }
-    [self.context addObject:@{@"role": @"assistant", @"content": assistantContent ?: @""}];
+    // Keep assistant history aligned with the JSON-only contract to avoid "training" the model
+    // back into emitting <think>/<answer> wrappers.
+    [self.context addObject:@{@"role": @"assistant", @"content": AutoGLMJSONStringFromObject(action) ?: @""}];
 
     if (stepDelay > 0) {
       [NSThread sleepForTimeInterval:stepDelay];
@@ -1536,6 +1655,8 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   double timeout = [d doubleForKey:kAutoGLMTimeoutSecondsKey];
   double stepDelay = [d doubleForKey:kAutoGLMStepDelaySecondsKey];
   BOOL insecure = [d boolForKey:kAutoGLMInsecureSkipTLSVerifyKey];
+  id dbgObj = [d objectForKey:kAutoGLMDebugLogRawAssistantKey];
+  BOOL debugRaw = (dbgObj == nil) ? YES : [d boolForKey:kAutoGLMDebugLogRawAssistantKey];
 
   if (maxSteps <= 0) {
     maxSteps = 30;
@@ -1556,6 +1677,7 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   self.config[kAutoGLMTimeoutSecondsKey] = @(timeout);
   self.config[kAutoGLMStepDelaySecondsKey] = @(stepDelay);
   self.config[kAutoGLMInsecureSkipTLSVerifyKey] = @(insecure);
+  self.config[kAutoGLMDebugLogRawAssistantKey] = @(debugRaw);
 }
 
 - (void)persistConfigToDefaults
@@ -1577,6 +1699,7 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   [d setDouble:AutoGLMParseDouble(self.config[kAutoGLMTimeoutSecondsKey], 90.0) forKey:kAutoGLMTimeoutSecondsKey];
   [d setDouble:AutoGLMParseDouble(self.config[kAutoGLMStepDelaySecondsKey], 0.5) forKey:kAutoGLMStepDelaySecondsKey];
   [d setBool:AutoGLMParseBool(self.config[kAutoGLMInsecureSkipTLSVerifyKey], NO) forKey:kAutoGLMInsecureSkipTLSVerifyKey];
+  [d setBool:AutoGLMParseBool(self.config[kAutoGLMDebugLogRawAssistantKey], YES) forKey:kAutoGLMDebugLogRawAssistantKey];
   [d synchronize];
 }
 
@@ -1615,6 +1738,9 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   if ([args objectForKey:@"insecure_skip_tls_verify"] != nil) {
     self.config[kAutoGLMInsecureSkipTLSVerifyKey] = @(AutoGLMParseBool(args[@"insecure_skip_tls_verify"], NO));
   }
+  if ([args objectForKey:@"debug_log_raw_assistant"] != nil) {
+    self.config[kAutoGLMDebugLogRawAssistantKey] = @(AutoGLMParseBool(args[@"debug_log_raw_assistant"], YES));
+  }
 
   [self persistConfigToDefaults];
 }
@@ -1635,6 +1761,7 @@ typedef void (^AutoGLMFinishBlock)(BOOL success, NSString *message);
   cfg[@"timeout_seconds"] = @(AutoGLMParseDouble(self.config[kAutoGLMTimeoutSecondsKey], 90.0));
   cfg[@"step_delay_seconds"] = @(AutoGLMParseDouble(self.config[kAutoGLMStepDelaySecondsKey], 0.5));
   cfg[@"insecure_skip_tls_verify"] = @(AutoGLMParseBool(self.config[kAutoGLMInsecureSkipTLSVerifyKey], NO));
+  cfg[@"debug_log_raw_assistant"] = @(AutoGLMParseBool(self.config[kAutoGLMDebugLogRawAssistantKey], YES));
   return cfg.copy;
 }
 
@@ -1757,61 +1884,75 @@ static NSString *AutoGLMAgentPageHTML(void)
   @"  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
   @"  <title>AutoGLM On‑Device Agent</title>\n"
   @"  <style>\n"
-  @"    body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:16px;}\n"
+  @"    :root{color-scheme:light dark;--bg:#fff;--fg:#111;--muted:#666;--card:#f6f6f6;--border:#ccc;--primary:#0a84ff;--danger:#ff3b30;--radius:12px;}\n"
+  @"    @media (prefers-color-scheme: dark){:root{--bg:#0b0b0c;--fg:#f2f2f2;--muted:#b0b0b0;--card:#1c1c1e;--border:#3a3a3c;--primary:#0a84ff;--danger:#ff453a;}}\n"
+  @"    html,body{height:100%;}\n"
+  @"    body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:16px;padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));padding-top:max(16px,env(safe-area-inset-top));padding-bottom:max(16px,env(safe-area-inset-bottom));}\n"
+  @"    .container{max-width:900px;margin:0 auto;}\n"
+  @"    h2{margin:0 0 8px 0;font-size:20px;}\n"
+  @"    h3{margin:16px 0 8px 0;font-size:16px;}\n"
   @"    label{display:block;margin-top:12px;font-weight:600;}\n"
-  @"    input,textarea{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;box-sizing:border-box;font-family:inherit;font-size:16px;}\n"
+  @"    input,textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:10px;box-sizing:border-box;font-family:inherit;font-size:16px;background:transparent;color:inherit;}\n"
+  @"    textarea{min-height:120px;resize:vertical;}\n"
   @"    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,\"Liberation Mono\",\"Courier New\",monospace;}\n"
-  @"    textarea{min-height:120px;}\n"
-  @"    .row{display:flex;gap:12px;}\n"
-  @"    .row>div{flex:1;}\n"
-  @"    button{padding:10px 14px;border:0;border-radius:10px;margin-right:8px;margin-top:12px;}\n"
-  @"    .primary{background:#0a84ff;color:#fff;}\n"
-  @"    .danger{background:#ff3b30;color:#fff;}\n"
-  @"    .muted{color:#666;font-size:12px;line-height:1.4;}\n"
-  @"    pre{background:#f6f6f6;padding:10px;border-radius:10px;white-space:pre-wrap;}\n"
+  @"    .row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}\n"
+  @"    @media (max-width: 680px){.row{grid-template-columns:1fr;}}\n"
+  @"    .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;}\n"
+  @"    button{min-height:44px;padding:10px 14px;border:0;border-radius:12px;flex:1 1 120px;}\n"
+  @"    .primary{background:var(--primary);color:#fff;}\n"
+  @"    .danger{background:var(--danger);color:#fff;}\n"
+  @"    .ghost{background:var(--card);color:inherit;border:1px solid var(--border);}\n"
+  @"    .muted{color:var(--muted);font-size:13px;line-height:1.45;}\n"
+  @"    .check{display:flex;align-items:center;gap:10px;margin-top:10px;user-select:none;}\n"
+  @"    .check input{width:auto;transform:scale(1.15);}\n"
+  @"    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,\"Liberation Mono\",\"Courier New\",monospace;font-size:13px;background:var(--card);padding:2px 6px;border-radius:8px;overflow-wrap:anywhere;}\n"
+  @"    pre{background:var(--card);border:1px solid var(--border);padding:10px;border-radius:var(--radius);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:40vh;overflow:auto;-webkit-overflow-scrolling:touch;font-size:12px;line-height:1.35;}\n"
   @"  </style>\n"
   @"</head>\n"
   @"<body>\n"
-  @"  <h2>AutoGLM On‑Device Agent (WDA Runner)</h2>\n"
-  @"  <div class=\"muted\">\n"
-  @"    This page configures and starts an agent running <b>inside</b> WebDriverAgentRunner (XCTest).\n"
-  @"    If LAN access fails, try opening this page with <code>http://127.0.0.1:8100/autoglm</code> on the iPhone.\n"
-  @"  </div>\n"
-  @"  <label>Base URL (OpenAI-compatible)</label>\n"
-  @"  <input id=\"base_url\" class=\"mono\" placeholder=\"https://...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" />\n"
-  @"  <label>Model</label>\n"
-  @"  <input id=\"model\" class=\"mono\" placeholder=\"gpt-4o-mini / ...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" />\n"
-  @"  <label>API Key</label>\n"
-  @"  <input id=\"api_key\" class=\"mono\" type=\"password\" placeholder=\"sk-...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" autocomplete=\"off\" />\n"
-  @"  <div class=\"muted\"><input type=\"checkbox\" id=\"show_api_key\" /> Show API key</div>\n"
-  @"  <div class=\"muted\"><input type=\"checkbox\" id=\"remember_api_key\" /> Remember API key on device (NOT recommended for shared devices)</div>\n"
-  @"  <label>Task</label>\n"
-  @"  <textarea id=\"task\" placeholder=\"Describe what to do... (e.g., open Xiaohongshu and ...)\"></textarea>\n"
-  @"  <div class=\"row\">\n"
-  @"    <div>\n"
-  @"      <label>Max Steps</label>\n"
-  @"      <input id=\"max_steps\" placeholder=\"30\" />\n"
+  @"  <div class=\"container\">\n"
+  @"    <h2>AutoGLM On‑Device Agent (WDA Runner)</h2>\n"
+  @"    <div class=\"muted\">\n"
+  @"      This page configures and starts an agent running <b>inside</b> WebDriverAgentRunner (XCTest).\n"
+  @"      If LAN access fails, try opening this page with <code>http://127.0.0.1:8100/autoglm</code> on the iPhone.\n"
   @"    </div>\n"
-  @"    <div>\n"
-  @"      <label>Timeout (seconds)</label>\n"
-  @"      <input id=\"timeout_seconds\" placeholder=\"90\" />\n"
+  @"    <label>Base URL (OpenAI-compatible)</label>\n"
+  @"    <input id=\"base_url\" class=\"mono\" placeholder=\"https://...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" />\n"
+  @"    <label>Model</label>\n"
+  @"    <input id=\"model\" class=\"mono\" placeholder=\"gpt-4o-mini / ...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" />\n"
+  @"    <label>API Key</label>\n"
+  @"    <input id=\"api_key\" class=\"mono\" type=\"password\" placeholder=\"sk-...\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\" autocomplete=\"off\" />\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"show_api_key\" /> <span>Show API key</span></label>\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"remember_api_key\" /> <span>Remember API key on device (NOT recommended for shared devices)</span></label>\n"
+  @"    <label>Task</label>\n"
+  @"    <textarea id=\"task\" placeholder=\"Describe what to do... (e.g., open Xiaohongshu and ...)\"></textarea>\n"
+  @"    <div class=\"row\">\n"
+  @"      <div>\n"
+  @"        <label>Max Steps</label>\n"
+  @"        <input id=\"max_steps\" placeholder=\"30\" inputmode=\"numeric\" />\n"
+  @"      </div>\n"
+  @"      <div>\n"
+  @"        <label>Timeout (seconds)</label>\n"
+  @"        <input id=\"timeout_seconds\" placeholder=\"90\" inputmode=\"numeric\" />\n"
+  @"      </div>\n"
+  @"      <div>\n"
+  @"        <label>Step Delay (seconds)</label>\n"
+  @"        <input id=\"step_delay_seconds\" placeholder=\"0.5\" inputmode=\"decimal\" />\n"
+  @"      </div>\n"
   @"    </div>\n"
-  @"    <div>\n"
-  @"      <label>Step Delay (seconds)</label>\n"
-  @"      <input id=\"step_delay_seconds\" placeholder=\"0.5\" />\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"insecure_skip_tls_verify\" /> <span>Insecure: skip TLS verify (debug only)</span></label>\n"
+  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"debug_log_raw_assistant\" /> <span>Debug: log raw assistant message (may contain sensitive info)</span></label>\n"
+  @"    <div class=\"actions\">\n"
+  @"      <button class=\"primary\" onclick=\"saveCfg()\">Save</button>\n"
+  @"      <button class=\"primary\" onclick=\"start()\">Start</button>\n"
+  @"      <button class=\"danger\" onclick=\"stop()\">Stop</button>\n"
+  @"      <button class=\"ghost\" onclick=\"refresh()\">Refresh</button>\n"
   @"    </div>\n"
+  @"    <h3>Status</h3>\n"
+  @"    <pre id=\"status\">Loading...</pre>\n"
+  @"    <h3>Logs</h3>\n"
+  @"    <pre id=\"logs\">(empty)</pre>\n"
   @"  </div>\n"
-  @"  <div class=\"muted\"><input type=\"checkbox\" id=\"insecure_skip_tls_verify\" /> Insecure: skip TLS verify (debug only)</div>\n"
-  @"  <div>\n"
-  @"    <button class=\"primary\" onclick=\"saveCfg()\">Save</button>\n"
-  @"    <button class=\"primary\" onclick=\"start()\">Start</button>\n"
-  @"    <button class=\"danger\" onclick=\"stop()\">Stop</button>\n"
-  @"    <button onclick=\"refresh()\">Refresh</button>\n"
-  @"  </div>\n"
-  @"  <h3>Status</h3>\n"
-  @"  <pre id=\"status\">Loading...</pre>\n"
-  @"  <h3>Logs</h3>\n"
-  @"  <pre id=\"logs\">(empty)</pre>\n"
   @"  <script>\n"
   @"    let dirty = false;\n"
   @"    let composing = false;\n"
@@ -1832,7 +1973,7 @@ static NSString *AutoGLMAgentPageHTML(void)
   @"        el.addEventListener('compositionstart', () => { composing = true; });\n"
   @"        el.addEventListener('compositionend', () => { composing = false; markDirty(); });\n"
   @"      }\n"
-  @"      const cbs = ['remember_api_key','insecure_skip_tls_verify'];\n"
+  @"      const cbs = ['remember_api_key','insecure_skip_tls_verify','debug_log_raw_assistant'];\n"
   @"      for (const id of cbs){\n"
   @"        const el = document.getElementById(id);\n"
   @"        if (!el) continue;\n"
@@ -1869,6 +2010,7 @@ static NSString *AutoGLMAgentPageHTML(void)
   @"        base_url: document.getElementById('base_url').value,\n"
   @"        model: document.getElementById('model').value,\n"
   @"        remember_api_key: document.getElementById('remember_api_key').checked,\n"
+  @"        debug_log_raw_assistant: document.getElementById('debug_log_raw_assistant').checked,\n"
   @"        task: document.getElementById('task').value,\n"
   @"        max_steps: document.getElementById('max_steps').value,\n"
   @"        timeout_seconds: document.getElementById('timeout_seconds').value,\n"
@@ -1888,6 +2030,7 @@ static NSString *AutoGLMAgentPageHTML(void)
   @"      document.getElementById('step_delay_seconds').value = cfg.step_delay_seconds || 0.5;\n"
   @"      document.getElementById('remember_api_key').checked = !!cfg.remember_api_key;\n"
   @"      document.getElementById('insecure_skip_tls_verify').checked = !!cfg.insecure_skip_tls_verify;\n"
+  @"      document.getElementById('debug_log_raw_assistant').checked = (cfg.debug_log_raw_assistant !== false);\n"
   @"      if (cfg.api_key_set) {\n"
   @"        document.getElementById('api_key').placeholder = '(set)';\n"
   @"      }\n"

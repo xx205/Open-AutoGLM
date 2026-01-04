@@ -12,6 +12,22 @@ WebDriverAgent（WDA）通常通过 `xcodebuild ... test` 启动。这个方式�
 
 ---
 
+## 重要说明：这条命令不会“卡住”
+
+默认情况下，`devicectl device process launch` 只负责发起启动请求，通常会立刻返回到终端：
+
+```bash
+xcrun devicectl device process launch --device <UDID> --no-activate <WDA_XCTRUNNER_BUNDLE_ID>
+```
+
+如果你想看到 Runner 是否“秒退/崩溃”的原因，可以加 `--console`（会等待进程退出并打印其输出）：
+
+```bash
+xcrun devicectl device process launch --device <UDID> --no-activate --console <WDA_XCTRUNNER_BUNDLE_ID>
+```
+
+---
+
 ## 关键点：必须加 `--no-activate`
 
 直接执行（默认会 activate）：
@@ -99,6 +115,30 @@ curl http://<iphone-ip>:8100/status
 ```bash
 curl http://127.0.0.1:8100/status
 ```
+
+---
+
+## 额外方案：只用 iPhone（点开 Runner 启动 WDA + Safari 配置 Agent）
+
+如果你的目标是“手机自带一个 agent 设施”，在 iPhone 上本地完成：
+
+- 点开 Runner → 启动 `:8100`（WDA server）
+- Safari 打开 `http://127.0.0.1:8100/autoglm` → 配置/启动任务
+- 需要停掉 WDA → 在 App 切换器里划掉 Runner（强杀即停止 WDA）
+
+那么你需要一个“可被直接启动”的 Runner。实践上 iOS 17+/18 常见需要把 Runner 包里的 `Frameworks/XC*.framework` 删除并重新签名后再安装，否则点开可能会闪退。
+
+推荐直接用仓库脚本“一次性安装 prepared Runner”：
+
+```bash
+bash scripts/install_wda_prepared_runner.sh --device <UDID>
+```
+
+安装完成后，在 iPhone 上：
+
+1) `Settings -> Apps -> WebDriverAgentRunner-Runner -> Wireless Data` → 选 **WLAN** 或 **WLAN & Cellular Data**（否则 WDA 无法联网请求 LLM）  
+2) 点开 `WebDriverAgentRunner-Runner`（WDA server 启动）  
+3) Safari 打开 `http://127.0.0.1:8100/autoglm`，填写 Base URL / Model / API Key / Task 并 Start  
 
 ### 2) 停止 WDA
 

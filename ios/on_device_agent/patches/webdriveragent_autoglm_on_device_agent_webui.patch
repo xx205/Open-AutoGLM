@@ -1,18 +1,11 @@
+diff --git a/WebDriverAgentRunner/UITestingUITests.m b/WebDriverAgentRunner/UITestingUITests.m
+index ad2ff455..c1a6e5b4 100644
 --- a/WebDriverAgentRunner/UITestingUITests.m
 +++ b/WebDriverAgentRunner/UITestingUITests.m
-@@ -5,15 +5,2128 @@
-  * This source code is licensed under the BSD-style license found in the
-  * LICENSE file in the root directory of this source tree.
-  */
-+
-+#import <XCTest/XCTest.h>
-+
-+#import <WebDriverAgentLib/FBDebugLogDelegateDecorator.h>
-+#import <WebDriverAgentLib/FBConfiguration.h>
-+#import <WebDriverAgentLib/FBFailureProofTestCase.h>
-+#import <WebDriverAgentLib/FBWebServer.h>
-+#import <WebDriverAgentLib/XCTestCase.h>
-+
+@@ -14,6 +14,2221 @@
+ #import <WebDriverAgentLib/FBWebServer.h>
+ #import <WebDriverAgentLib/XCTestCase.h>
+ 
 +#import <WebDriverAgentLib/FBCommandHandler.h>
 +#import <WebDriverAgentLib/FBHTTPStatusCodes.h>
 +#import <WebDriverAgentLib/FBLogger.h>
@@ -28,6 +21,9 @@
 +static NSString *const kAutoGLMBaseURLKey = @"AUTOGLM_BASE_URL";
 +static NSString *const kAutoGLMModelKey = @"AUTOGLM_MODEL";
 +static NSString *const kAutoGLMApiKeyKey = @"AUTOGLM_API_KEY";
++static NSString *const kAutoGLMMaxCompletionTokensKey = @"AUTOGLM_MAX_COMPLETION_TOKENS";
++static NSString *const kAutoGLMUseCustomSystemPromptKey = @"AUTOGLM_USE_CUSTOM_SYSTEM_PROMPT";
++static NSString *const kAutoGLMCustomSystemPromptKey = @"AUTOGLM_CUSTOM_SYSTEM_PROMPT";
 +static NSString *const kAutoGLMMaxStepsKey = @"AUTOGLM_MAX_STEPS";
 +static NSString *const kAutoGLMTimeoutSecondsKey = @"AUTOGLM_TIMEOUT_SECONDS";
 +static NSString *const kAutoGLMStepDelaySecondsKey = @"AUTOGLM_STEP_DELAY_SECONDS";
@@ -236,6 +232,108 @@
 +    return day;
 +  }
 +  return [NSString stringWithFormat:@"%@ %@", day, weekday];
++}
++
++static NSString *AutoGLMFormattedDateEN(void)
++{
++  NSDate *date = [NSDate date];
++
++  NSDateFormatter *df = [NSDateFormatter new];
++  df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
++  df.dateFormat = @"yyyy-MM-dd";
++  NSString *day = [df stringFromDate:date] ?: @"";
++
++  NSDateFormatter *wf = [NSDateFormatter new];
++  wf.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
++  wf.dateFormat = @"EEE";
++  NSString *weekday = [wf stringFromDate:date] ?: @"";
++
++  if (weekday.length == 0) {
++    return day;
++  }
++  return [NSString stringWithFormat:@"%@ (%@)", day, weekday];
++}
++
++static NSString *AutoGLMHTMLEscape(NSString *s)
++{
++  NSString *out = s ?: @"";
++  out = [out stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"];
++  out = [out stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
++  out = [out stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
++  out = [out stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
++  return out;
++}
++
++static NSString *AutoGLMJSONStringLiteral(NSString *s)
++{
++  NSString *value = s ?: @"";
++  NSError *err = nil;
++  NSData *data = [NSJSONSerialization dataWithJSONObject:@[value] options:0 error:&err];
++  if (data == nil) {
++    return @"\"\"";
++  }
++  NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
++  // Format: ["..."], return the inner string literal "...".
++  if ([json hasPrefix:@"["] && [json hasSuffix:@"]"] && json.length >= 2) {
++    return [json substringWithRange:NSMakeRange(1, json.length - 2)];
++  }
++  return @"\"\"";
++}
++
++static NSString *AutoGLMDefaultSystemPromptTemplate(void)
++{
++  return
++	    @"今天的日期是: {{DATE_ZH}}\n"
++	    @"你是一个智能体分析专家，可以根据操作历史和当前状态图执行一系列操作来完成任务。\n"
++	    @"注意：本项目使用 JSON action。\n"
++	    @"你必须输出且只能输出 1 个合法的 JSON 对象。\n"
++	    @"要求：该 JSON 必须包含键 \"think\"，用于填写你为什么选择这个操作的简短推理说明；以及键 \"action\"，用于填写本次执行的具体操作指令。\n"
++	    @"其中：\"action\" 必须是字符串（例如 \"Launch\" / \"Tap\" / \"Type\" / ...），不要把 \"action\" 输出为嵌套对象。\n"
++	    @"\n"
++	    @"你必须维护一个 checklist 计划（字段 \"plan\"），用于长期任务的分步执行与自我校验。\n"
++	    @"- 第 0 步：在 JSON 中包含 \"plan\"，它是一个数组，每个元素是一个对象：{\"text\": \"...\", \"done\": true/false}。\n"
++	    @"- 后续每一步：继续在 JSON 中包含 \"plan\"，并根据当前进度更新每个条目的 done 状态（必要时可以增删条目，但保持条目数量精简）。\n"
++	    @"\n"
++	    @"操作指令 action 的取值及其作用如下：\n"
++    @"- {\"action\":\"Launch\",\"app\":\"xxx\"}\n"
++    @"    Launch是启动目标app的操作，这比通过主屏幕导航更快。此操作完成后，您将自动收到结果状态的截图。\n"
++    @"- {\"action\":\"Tap\",\"element\":[x,y]}\n"
++    @"    Tap是点击操作，点击屏幕上的特定点。可用此操作点击按钮、选择项目、从主屏幕打开应用程序，或与任何可点击的用户界面元素进行交互。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。\n"
++    @"- {\"action\":\"Tap\",\"element\":[x,y],\"message\":\"重要操作\"}\n"
++    @"    基本功能同Tap，点击涉及财产、支付、隐私等敏感按钮时触发。\n"
++    @"- {\"action\":\"Type\",\"text\":\"xxx\"}\n"
++    @"    Type是输入操作，在当前聚焦的输入框中输入文本。使用此操作前，请确保输入框已被聚焦（先点击它）。输入的文本将像使用键盘输入一样输入。重要提示：手机可能正在使用 ADB 键盘，该键盘不会像普通键盘那样占用屏幕空间。要确认键盘已激活，请查看屏幕底部是否显示 'ADB Keyboard {ON}' 类似的文本，或者检查输入框是否处于激活/高亮状态。不要仅仅依赖视觉上的键盘显示。自动清除文本：当你使用输入操作时，输入框中现有的任何文本（包括占位符文本和实际输入）都会在输入新文本前自动清除。你无需在输入前手动清除文本——直接使用输入操作输入所需文本即可。操作完成后，你将自动收到结果状态的截图。\n"
++    @"- {\"action\":\"Type_Name\",\"text\":\"xxx\"}\n"
++    @"    Type_Name是输入人名的操作，基本功能同Type。\n"
++    @"- {\"action\":\"Interact\"}\n"
++    @"    Interact是当有多个满足条件的选项时而触发的交互操作，询问用户如何选择。\n"
++    @"- {\"action\":\"Swipe\",\"start\":[x1,y1],\"end\":[x2,y2]}\n"
++    @"    Swipe是滑动操作，通过从起始坐标拖动到结束坐标来执行滑动手势。可用于滚动内容、在屏幕之间导航、下拉通知栏以及项目栏或进行基于手势的导航。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。滑动持续时间会自动调整以实现自然的移动。此操作完成后，您将自动收到结果状态的截图。\n"
++    @"- {\"action\":\"Note\",\"message\":\"...\"}\n"
++    @"    Note 是“工作记忆/笔记”（Working Notes）：\n"
++    @"    - 用 message 覆盖/改写整段笔记（不是追加；你可以自由重写、整理、删除、压缩信息）。\n"
++    @"    - Working Notes 会在后续每一步都提供给你（你不需要在回答里反复复述）。\n"
++    @"    - 每次任务 Start 会自动清空 Working Notes。\n"
++    @"    - 何时用 Note：当你从截图/页面中读到了“后续一定要用到且容易忘”的信息时，例如：要填写到表格的文字、账号/链接/ID、统计结果、已完成的收集列表等。\n"
++    @"    - 不要滥用：只有当笔记需要更新时才输出 Note；否则直接输出下一步 UI 操作。\n"
++    @"    - Note 不会触发任何 UI 操作，只是在你的 Working Notes 里写下信息。\n"
++    @"    示例：{\"action\":\"Note\",\"message\":\"已收集封面文字：\\n1) ...\\n2) ...\"}\n"
++    @"- {\"action\":\"Call_API\",\"instruction\":\"xxx\"}\n"
++    @"    总结或评论当前页面或已记录的内容。\n"
++    @"- {\"action\":\"Long Press\",\"element\":[x,y]}\n"
++    @"    Long Pres是长按操作，在屏幕上的特定点长按指定时间。可用于触发上下文菜单、选择文本或激活长按交互。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的屏幕截图。\n"
++    @"- {\"action\":\"Double Tap\",\"element\":[x,y]}\n"
++    @"    Double Tap在屏幕上的特定点快速连续点按两次。使用此操作可以激活双击交互，如缩放、选择文本或打开项目。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。\n"
++    @"- {\"action\":\"Take_over\",\"message\":\"xxx\"}\n"
++    @"    Take_over是接管操作，表示在登录和验证阶段需要用户协助。\n"
++    @"- {\"action\":\"Back\"}\n"
++    @"    导航返回到上一个屏幕或关闭当前对话框。相当于按下 Android 的返回按钮。使用此操作可以从更深的屏幕返回、关闭弹出窗口或退出当前上下文。此操作完成后，您将自动收到结果状态的截图。\n"
++    @"- {\"action\":\"Home\"}\n"
++    @"    Home是回到系统桌面的操作，相当于按下 Android 主屏幕按钮。使用此操作可退出当前应用并返回启动器，或从已知状态启动新任务。此操作完成后，您将自动收到结果状态的截图。\n"
++    @"- {\"action\":\"Wait\",\"duration\":\"x seconds\"}\n"
++    @"    等待页面加载，x为需要等待多少秒。\n"
++    @"- {\"action\":\"Finish\",\"message\":\"xxx\"}\n"
++    @"    Finish是结束任务的操作，表示准确完整完成任务，message是终止信息。\n";
 +}
 +
 +static NSDictionary<NSString *, NSString *> *AutoGLMAppBundleIdMap(void)
@@ -564,6 +662,7 @@
 +@property (nonatomic, strong) NSURLSession *session;
 +@property (nonatomic, strong) NSMutableArray<NSDictionary *> *context;
 +@property (nonatomic, copy) NSArray<NSDictionary *> *planChecklist;
++@property (atomic, copy) NSString *workingNote;
 +@end
 +
 +@implementation AutoGLMOnDeviceAgent
@@ -579,6 +678,7 @@
 +  _finish = [finish copy];
 +  _stopRequested = NO;
 +  _planChecklist = @[];
++  _workingNote = @"";
 +
 +  NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
 +  cfg.timeoutIntervalForRequest = AutoGLMParseDouble(config[kAutoGLMTimeoutSecondsKey], 90.0);
@@ -598,54 +698,15 @@
 +
 +- (NSString *)buildSystemPrompt
 +{
-+  NSString *date = AutoGLMFormattedDateZH();
++  return AutoGLMDefaultSystemPromptTemplate();
++}
 +
-+	  return [NSString stringWithFormat:
-+	    @"今天的日期是: %@\n"
-+	    @"你是一个智能体分析专家，可以根据操作历史和当前状态图执行一系列操作来完成任务。\n"
-+	    @"注意：本项目使用 JSON action。\n"
-+	    @"你必须输出且只能输出 1 个合法的 JSON 对象。\n"
-+	    @"要求：该 JSON 必须包含键 \"think\"，用于填写你为什么选择这个操作的简短推理说明；以及键 \"action\"，用于填写本次执行的具体操作指令。\n"
-+	    @"其中：\"action\" 必须是字符串（例如 \"Launch\" / \"Tap\" / \"Type\" / ...），不要把 \"action\" 输出为嵌套对象。\n"
-+	    @"\n"
-+	    @"你必须维护一个 checklist 计划（字段 \"plan\"），用于长期任务的分步执行与自我校验。\n"
-+	    @"- 第 0 步：在 JSON 中包含 \"plan\"，它是一个数组，每个元素是一个对象：{\"text\": \"...\", \"done\": true/false}。\n"
-+	    @"- 后续每一步：继续在 JSON 中包含 \"plan\"，并根据当前进度更新每个条目的 done 状态（必要时可以增删条目，但保持条目数量精简）。\n"
-+	    @"\n"
-+	    @"操作指令 action 的取值及其作用如下：\n"
-+    @"- {\"action\":\"Launch\",\"app\":\"xxx\"}\n"
-+    @"    Launch是启动目标app的操作，这比通过主屏幕导航更快。此操作完成后，您将自动收到结果状态的截图。\n"
-+    @"- {\"action\":\"Tap\",\"element\":[x,y]}\n"
-+    @"    Tap是点击操作，点击屏幕上的特定点。可用此操作点击按钮、选择项目、从主屏幕打开应用程序，或与任何可点击的用户界面元素进行交互。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。\n"
-+    @"- {\"action\":\"Tap\",\"element\":[x,y],\"message\":\"重要操作\"}\n"
-+    @"    基本功能同Tap，点击涉及财产、支付、隐私等敏感按钮时触发。\n"
-+    @"- {\"action\":\"Type\",\"text\":\"xxx\"}\n"
-+    @"    Type是输入操作，在当前聚焦的输入框中输入文本。使用此操作前，请确保输入框已被聚焦（先点击它）。输入的文本将像使用键盘输入一样输入。重要提示：手机可能正在使用 ADB 键盘，该键盘不会像普通键盘那样占用屏幕空间。要确认键盘已激活，请查看屏幕底部是否显示 'ADB Keyboard {ON}' 类似的文本，或者检查输入框是否处于激活/高亮状态。不要仅仅依赖视觉上的键盘显示。自动清除文本：当你使用输入操作时，输入框中现有的任何文本（包括占位符文本和实际输入）都会在输入新文本前自动清除。你无需在输入前手动清除文本——直接使用输入操作输入所需文本即可。操作完成后，你将自动收到结果状态的截图。\n"
-+    @"- {\"action\":\"Type_Name\",\"text\":\"xxx\"}\n"
-+    @"    Type_Name是输入人名的操作，基本功能同Type。\n"
-+    @"- {\"action\":\"Interact\"}\n"
-+    @"    Interact是当有多个满足条件的选项时而触发的交互操作，询问用户如何选择。\n"
-+    @"- {\"action\":\"Swipe\",\"start\":[x1,y1],\"end\":[x2,y2]}\n"
-+    @"    Swipe是滑动操作，通过从起始坐标拖动到结束坐标来执行滑动手势。可用于滚动内容、在屏幕之间导航、下拉通知栏以及项目栏或进行基于手势的导航。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。滑动持续时间会自动调整以实现自然的移动。此操作完成后，您将自动收到结果状态的截图。\n"
-+    @"- {\"action\":\"Note\",\"message\":\"True\"}\n"
-+    @"    记录当前页面内容以便后续总结。\n"
-+    @"- {\"action\":\"Call_API\",\"instruction\":\"xxx\"}\n"
-+    @"    总结或评论当前页面或已记录的内容。\n"
-+    @"- {\"action\":\"Long Press\",\"element\":[x,y]}\n"
-+    @"    Long Pres是长按操作，在屏幕上的特定点长按指定时间。可用于触发上下文菜单、选择文本或激活长按交互。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的屏幕截图。\n"
-+    @"- {\"action\":\"Double Tap\",\"element\":[x,y]}\n"
-+    @"    Double Tap在屏幕上的特定点快速连续点按两次。使用此操作可以激活双击交互，如缩放、选择文本或打开项目。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。\n"
-+    @"- {\"action\":\"Take_over\",\"message\":\"xxx\"}\n"
-+    @"    Take_over是接管操作，表示在登录和验证阶段需要用户协助。\n"
-+    @"- {\"action\":\"Back\"}\n"
-+    @"    导航返回到上一个屏幕或关闭当前对话框。相当于按下 Android 的返回按钮。使用此操作可以从更深的屏幕返回、关闭弹出窗口或退出当前上下文。此操作完成后，您将自动收到结果状态的截图。\n"
-+    @"- {\"action\":\"Home\"}\n"
-+    @"    Home是回到系统桌面的操作，相当于按下 Android 主屏幕按钮。使用此操作可退出当前应用并返回启动器，或从已知状态启动新任务。此操作完成后，您将自动收到结果状态的截图。\n"
-+    @"- {\"action\":\"Wait\",\"duration\":\"x seconds\"}\n"
-+    @"    等待页面加载，x为需要等待多少秒。\n"
-+    @"- {\"action\":\"Finish\",\"message\":\"xxx\"}\n"
-+    @"    Finish是结束任务的操作，表示准确完整完成任务，message是终止信息。\n"
-+  , date];
++- (NSString *)renderSystemPromptTemplate:(NSString *)template
++{
++  NSString *out = template ?: @"";
++  out = [out stringByReplacingOccurrencesOfString:@"{{DATE_ZH}}" withString:AutoGLMFormattedDateZH()];
++  out = [out stringByReplacingOccurrencesOfString:@"{{DATE_EN}}" withString:AutoGLMFormattedDateEN()];
++  return out;
 +}
 +
 +- (NSArray<NSDictionary *> *)sanitizePlanChecklist:(id)planObj
@@ -708,6 +769,15 @@
 +    idx += 1;
 +  }
 +  return s.copy;
++}
++
++- (NSString *)workingNoteText
++{
++  NSString *note = self.workingNote ?: @"";
++  if (note.length == 0) {
++    return @"";
++  }
++  return [NSString stringWithFormat:@"** Working Notes **\n%@\n", note];
 +}
 +
 +- (NSURL *)chatCompletionsURL
@@ -823,60 +893,6 @@
 +  self.context[self.context.count - 1] = [mut copy];
 +}
 +
-+- (NSString *)extractAnswerPayload:(NSString *)text
-+{
-+  if (text.length == 0) {
-+    return text;
-+  }
-+  NSRange start = [text rangeOfString:@"<answer>"];
-+  NSRange end = [text rangeOfString:@"</answer>"];
-+  if (start.location != NSNotFound && end.location != NSNotFound && end.location > (start.location + start.length)) {
-+    NSString *inner = [text substringWithRange:NSMakeRange(start.location + start.length, end.location - (start.location + start.length))];
-+    return AutoGLMTrim(inner);
-+  }
-+  return AutoGLMTrim(text);
-+}
-+
-+- (NSString *)extractThinkingPayload:(NSString *)text
-+{
-+  if (text.length == 0) {
-+    return @"";
-+  }
-+
-+  // If the assistant starts directly with <answer>, there is no "thinking" text in content.
-+  // (We may still have provider-specific reasoning fields handled separately.)
-+  NSString *allTrimmed = AutoGLMTrim(text);
-+  if ([allTrimmed hasPrefix:@"<answer>"]) {
-+    return @"";
-+  }
-+
-+  // 1) Explicit <think>...</think>
-+  NSRange start = [text rangeOfString:@"<think>"];
-+  NSRange end = [text rangeOfString:@"</think>"];
-+  if (start.location != NSNotFound && end.location != NSNotFound && end.location > (start.location + start.length)) {
-+    NSString *inner = [text substringWithRange:NSMakeRange(start.location + start.length, end.location - (start.location + start.length))];
-+    return AutoGLMTrim(inner);
-+  }
-+
-+  // 2) No <think>, but there is an <answer>: use everything before <answer> as thinking (same idea as python client).
-+  NSRange answer = [text rangeOfString:@"<answer>"];
-+  if (answer.location != NSNotFound && answer.location > 0) {
-+    NSString *before = [text substringToIndex:answer.location];
-+    NSString *trimmed = AutoGLMTrim(before);
-+    return trimmed;
-+  }
-+
-+  // 3) Fallback: if there is a JSON object, use everything before the first '{' as thinking.
-+  NSRange firstBrace = [text rangeOfString:@"{"];
-+  if (firstBrace.location != NSNotFound && firstBrace.location > 0) {
-+    NSString *before = [text substringToIndex:firstBrace.location];
-+    NSString *trimmed = AutoGLMTrim(before);
-+    return trimmed;
-+  }
-+
-+  return @"";
-+}
-+
 +- (NSString *)firstJSONObjectStringFromText:(NSString *)text error:(NSError **)error
 +{
 +  NSString *s = text ?: @"";
@@ -899,7 +915,7 @@
 +
 +- (NSDictionary *)parseActionFromModelText:(NSString *)text error:(NSError **)error
 +{
-+  NSString *payload = [self extractAnswerPayload:text];
++  NSString *payload = AutoGLMTrim(text ?: @"");
 +  NSError *extractErr = nil;
 +  NSString *jsonStr = [self firstJSONObjectStringFromText:payload error:&extractErr];
 +  if (jsonStr.length == 0) {
@@ -913,29 +929,14 @@
 +  NSError *jsonErr = nil;
 +  id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
 +  if ([obj isKindOfClass:NSDictionary.class]) {
-+    NSMutableDictionary *mut = [((NSDictionary *)obj) mutableCopy];
-+    // Some models may mistakenly wrap the action payload as an object:
-+    // {"think":"...","action":{"action":"Launch","app":"..."},"plan":[...]}
-+    // Flatten it back to the expected shape: {"action":"Launch","app":"...","think":"...","plan":[...]}
-+    id actionField = mut[@"action"];
-+    if ([actionField isKindOfClass:NSDictionary.class]) {
-+      NSDictionary *inner = (NSDictionary *)actionField;
-+      id innerAction = inner[@"action"];
-+      if ([innerAction isKindOfClass:NSString.class]) {
-+        [mut removeObjectForKey:@"action"];
-+        for (NSString *key in inner) {
-+          if ([key isEqualToString:@"think"] || [key isEqualToString:@"plan"]) {
-+            continue;
-+          }
-+          id v = inner[key];
-+          if (v != nil) {
-+            mut[key] = v;
-+          }
-+        }
-+        mut[@"action"] = innerAction;
++    NSDictionary *dict = (NSDictionary *)obj;
++    if (![dict[@"action"] isKindOfClass:NSString.class]) {
++      if (error) {
++        *error = [NSError errorWithDomain:@"AutoGLMOnDeviceAgent" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid action JSON: field 'action' must be a string"}];
 +      }
++      return nil;
 +    }
-+    return mut.copy;
++    return dict;
 +  }
 +
 +  if (error) {
@@ -1053,7 +1054,7 @@
 +    @"model": AutoGLMStringOrEmpty(self.config[kAutoGLMModelKey]),
 +    @"messages": messages ?: @[],
 +    @"temperature": @1,
-+    @"max_tokens": @32768,
++    @"max_completion_tokens": @(AutoGLMParseInt(self.config[kAutoGLMMaxCompletionTokensKey], 32768)),
 +  };
 +
 +  NSData *payload = [NSJSONSerialization dataWithJSONObject:body options:0 error:error];
@@ -1115,8 +1116,7 @@
 +    }
 +    return nil;
 +  }
- 
--#import <XCTest/XCTest.h>
++
 +  NSDictionary *json = [NSJSONSerialization JSONObjectWithData:respData options:0 error:error];
 +  if (![json isKindOfClass:NSDictionary.class]) {
 +    if (error && *error == nil) {
@@ -1126,12 +1126,7 @@
 +  }
 +  return json;
 +}
- 
--#import <WebDriverAgentLib/FBDebugLogDelegateDecorator.h>
--#import <WebDriverAgentLib/FBConfiguration.h>
--#import <WebDriverAgentLib/FBFailureProofTestCase.h>
--#import <WebDriverAgentLib/FBWebServer.h>
--#import <WebDriverAgentLib/XCTestCase.h>
++
 +- (BOOL)performAction:(NSDictionary *)action error:(NSError **)error
 +{
 +  NSString *actionName = [action[@"action"] isKindOfClass:NSString.class] ? AutoGLMNormalizeActionName((NSString *)action[@"action"]) : @"";
@@ -1141,7 +1136,7 @@
 +    }
 +    return NO;
 +  }
- 
++
 +  // Non-UI actions (do not block the main thread)
 +  if ([actionName isEqualToString:@"wait"]) {
 +    double seconds = AutoGLMParseDouble(action[@"seconds"], 0.0);
@@ -1159,6 +1154,7 @@
 +  }
 +  if ([actionName isEqualToString:@"note"]) {
 +    NSString *msg = AutoGLMStringOrEmpty(action[@"message"]);
++    self.workingNote = msg;
 +    if (msg.length > 0) {
 +      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Note: %@", AutoGLMTruncate(msg, 800)]];
 +    } else {
@@ -1364,7 +1360,17 @@
 +  [self emit:[NSString stringWithFormat:@"[AUTOGLM] Task: %@", task]];
 +
 +  [self.context removeAllObjects];
-+  [self.context addObject:@{@"role": @"system", @"content": [self buildSystemPrompt] ?: @""}];
++  self.planChecklist = @[];
++  self.workingNote = @"";
++  NSString *systemTemplate = [self buildSystemPrompt] ?: @"";
++  BOOL useCustom = AutoGLMParseBool(self.config[kAutoGLMUseCustomSystemPromptKey], NO);
++  if (useCustom) {
++    NSString *custom = AutoGLMStringOrEmpty(self.config[kAutoGLMCustomSystemPromptKey]);
++    if (custom.length > 0) {
++      systemTemplate = custom;
++    }
++  }
++  [self.context addObject:@{@"role": @"system", @"content": [self renderSystemPromptTemplate:systemTemplate] ?: @""}];
 +
 +  for (NSInteger step = 0; step < maxSteps; step++) {
 +    if (self.stopRequested) {
@@ -1391,8 +1397,19 @@
 +      textContent = [NSString stringWithFormat:@"%@\n\n%@", task, screenInfo ?: @"{}"];
 +    } else {
 +      NSString *planText = [self planChecklistText];
++      NSString *noteText = [self workingNoteText];
++      NSMutableString *prefix = [NSMutableString string];
 +      if (planText.length > 0) {
-+        textContent = [NSString stringWithFormat:@"%@\n\n** Screen Info **\n\n%@", planText, screenInfo ?: @"{}"];
++        [prefix appendString:planText];
++      }
++      if (noteText.length > 0) {
++        if (prefix.length > 0 && ![prefix hasSuffix:@"\n"]) {
++          [prefix appendString:@"\n"];
++        }
++        [prefix appendString:noteText];
++      }
++      if (prefix.length > 0) {
++        textContent = [NSString stringWithFormat:@"%@\n\n** Screen Info **\n\n%@", prefix, screenInfo ?: @"{}"];
 +      } else {
 +        textContent = [NSString stringWithFormat:@"** Screen Info **\n\n%@", screenInfo ?: @"{}"];
 +      }
@@ -1443,13 +1460,10 @@
 +      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Model reasoning: %@", AutoGLMTruncate(modelReasoning, 800)]];
 +    }
 +
-+    NSString *thinking = [self extractThinkingPayload:content];
-+    if (thinking.length > 0) {
-+      [self emit:[NSString stringWithFormat:@"[AUTOGLM] Thinking: %@", AutoGLMTruncate(thinking, 800)]];
-+    } else if (modelReasoning.length == 0) {
-+      NSString *rawPreview = AutoGLMTruncate(AutoGLMTrim(content), 400);
-+      if (rawPreview.length > 0) {
-+        [self emit:[NSString stringWithFormat:@"[AUTOGLM] Raw model content (truncated): %@", rawPreview]];
++    if (modelReasoning.length == 0) {
++      NSString *raw = AutoGLMTrim(content);
++      if (raw.length > 0) {
++        [self emit:[NSString stringWithFormat:@"[AUTOGLM] Raw model content: %@", raw]];
 +      }
 +    }
 +
@@ -1476,7 +1490,7 @@
 +      NSString *badOutput = AutoGLMTruncate(AutoGLMTrim(contentForParse), 4000);
 +      NSString *fixText = [NSString stringWithFormat:
 +        @"你上一条输出无法解析为合法 JSON（错误：%@）。\n"
-+        @"请仅输出 1 个合法的 JSON 对象（不要输出任何多余文本、不要输出 <think>/<answer> 标签、不要输出代码块）。\n"
++        @"请仅输出 1 个合法的 JSON 对象（不要输出任何多余文本、不要输出代码块）。\n"
 +        @"要求：该 JSON 必须包含键 \"action\"，并尽量保持与你上一条输出的意图一致；推理说明请放到字符串字段 \"think\"；并继续包含/更新 checklist 字段 \"plan\"。\n"
 +        @"上一条输出如下：\n%@",
 +        errMsg,
@@ -1549,8 +1563,7 @@
 +      return;
 +    }
 +
-+    // Keep assistant history aligned with the JSON-only contract to avoid "training" the model
-+    // back into emitting <think>/<answer> wrappers.
++    // Keep assistant history aligned with the JSON-only contract.
 +    [self.context addObject:@{@"role": @"assistant", @"content": AutoGLMJSONStringFromObject(action) ?: @""}];
 +
 +    if (stepDelay > 0) {
@@ -1603,6 +1616,7 @@
 +@property (nonatomic, strong) AutoGLMOnDeviceAgent *agent;
 +@property (nonatomic, assign) BOOL running;
 +@property (nonatomic, copy) NSString *lastMessage;
++@property (nonatomic, copy) NSString *notes;
 +@end
 +
 +@implementation AutoGLMOnDeviceAgentManager
@@ -1628,6 +1642,7 @@
 +  _config = [NSMutableDictionary dictionary];
 +  _running = NO;
 +  _lastMessage = @"";
++  _notes = @"";
 +
 +  [self loadConfigFromDefaults];
 +  return self;
@@ -1656,7 +1671,11 @@
 +    apiKey = [d stringForKey:kAutoGLMApiKeyKey] ?: @"";
 +  }
 +
++  BOOL useCustomSystemPrompt = [d boolForKey:kAutoGLMUseCustomSystemPromptKey];
++  NSString *customSystemPrompt = [d stringForKey:kAutoGLMCustomSystemPromptKey] ?: @"";
++
 +  NSInteger maxSteps = (NSInteger)[d integerForKey:kAutoGLMMaxStepsKey];
++  NSInteger maxCompletionTokens = (NSInteger)[d integerForKey:kAutoGLMMaxCompletionTokensKey];
 +  double timeout = [d doubleForKey:kAutoGLMTimeoutSecondsKey];
 +  double stepDelay = [d doubleForKey:kAutoGLMStepDelaySecondsKey];
 +  BOOL insecure = [d boolForKey:kAutoGLMInsecureSkipTLSVerifyKey];
@@ -1665,6 +1684,9 @@
 +
 +  if (maxSteps <= 0) {
 +    maxSteps = 30;
++  }
++  if (maxCompletionTokens <= 0) {
++    maxCompletionTokens = 32768;
 +  }
 +  if (timeout <= 0) {
 +    timeout = 90.0;
@@ -1678,6 +1700,9 @@
 +  self.config[kAutoGLMModelKey] = model;
 +  self.config[kAutoGLMApiKeyKey] = apiKey;
 +  self.config[kAutoGLMRememberApiKeyKey] = @(remember);
++  self.config[kAutoGLMUseCustomSystemPromptKey] = @(useCustomSystemPrompt);
++  self.config[kAutoGLMCustomSystemPromptKey] = customSystemPrompt;
++  self.config[kAutoGLMMaxCompletionTokensKey] = @(maxCompletionTokens);
 +  self.config[kAutoGLMMaxStepsKey] = @(maxSteps);
 +  self.config[kAutoGLMTimeoutSecondsKey] = @(timeout);
 +  self.config[kAutoGLMStepDelaySecondsKey] = @(stepDelay);
@@ -1700,6 +1725,15 @@
 +    [d removeObjectForKey:kAutoGLMApiKeyKey];
 +  }
 +
++  [d setBool:AutoGLMParseBool(self.config[kAutoGLMUseCustomSystemPromptKey], NO) forKey:kAutoGLMUseCustomSystemPromptKey];
++  NSString *customSystemPrompt = AutoGLMStringOrEmpty(self.config[kAutoGLMCustomSystemPromptKey]);
++  if (customSystemPrompt.length > 0) {
++    [d setObject:customSystemPrompt forKey:kAutoGLMCustomSystemPromptKey];
++  } else {
++    [d removeObjectForKey:kAutoGLMCustomSystemPromptKey];
++  }
++
++  [d setInteger:AutoGLMParseInt(self.config[kAutoGLMMaxCompletionTokensKey], 32768) forKey:kAutoGLMMaxCompletionTokensKey];
 +  [d setInteger:AutoGLMParseInt(self.config[kAutoGLMMaxStepsKey], 30) forKey:kAutoGLMMaxStepsKey];
 +  [d setDouble:AutoGLMParseDouble(self.config[kAutoGLMTimeoutSecondsKey], 90.0) forKey:kAutoGLMTimeoutSecondsKey];
 +  [d setDouble:AutoGLMParseDouble(self.config[kAutoGLMStepDelaySecondsKey], 0.5) forKey:kAutoGLMStepDelaySecondsKey];
@@ -1728,8 +1762,17 @@
 +    self.config[kAutoGLMApiKeyKey] = apiKey;
 +  }
 +
++  if ([args objectForKey:@"use_custom_system_prompt"] != nil) {
++    self.config[kAutoGLMUseCustomSystemPromptKey] = @(AutoGLMParseBool(args[@"use_custom_system_prompt"], NO));
++  }
++  if ([args objectForKey:@"system_prompt"] != nil) {
++    self.config[kAutoGLMCustomSystemPromptKey] = AutoGLMStringOrEmpty(args[@"system_prompt"]);
++  }
 +  if ([args objectForKey:@"remember_api_key"] != nil) {
 +    self.config[kAutoGLMRememberApiKeyKey] = @(AutoGLMParseBool(args[@"remember_api_key"], NO));
++  }
++  if ([args objectForKey:@"max_completion_tokens"] != nil) {
++    self.config[kAutoGLMMaxCompletionTokensKey] = @(AutoGLMParseInt(args[@"max_completion_tokens"], 32768));
 +  }
 +  if ([args objectForKey:@"max_steps"] != nil) {
 +    self.config[kAutoGLMMaxStepsKey] = @(AutoGLMParseInt(args[@"max_steps"], 30));
@@ -1762,6 +1805,10 @@
 +  cfg[@"api_key_set"] = @(apiKey.length > 0);
 +  cfg[@"remember_api_key"] = @(remember);
 +
++  cfg[@"use_custom_system_prompt"] = @(AutoGLMParseBool(self.config[kAutoGLMUseCustomSystemPromptKey], NO));
++  cfg[@"system_prompt"] = AutoGLMStringOrEmpty(self.config[kAutoGLMCustomSystemPromptKey]);
++
++  cfg[@"max_completion_tokens"] = @(AutoGLMParseInt(self.config[kAutoGLMMaxCompletionTokensKey], 32768));
 +  cfg[@"max_steps"] = @(AutoGLMParseInt(self.config[kAutoGLMMaxStepsKey], 30));
 +  cfg[@"timeout_seconds"] = @(AutoGLMParseDouble(self.config[kAutoGLMTimeoutSecondsKey], 90.0));
 +  cfg[@"step_delay_seconds"] = @(AutoGLMParseDouble(self.config[kAutoGLMStepDelaySecondsKey], 0.5));
@@ -1774,10 +1821,16 @@
 +{
 +  __block NSDictionary *st = nil;
 +  dispatch_sync(self.stateQueue, ^{
++    NSString *notes = self.notes ?: @"";
++    if (self.agent != nil) {
++      notes = self.agent.workingNote ?: @"";
++      self.notes = notes;
++    }
 +    st = @{
 +      @"running": @(self.running),
 +      @"last_message": self.lastMessage ?: @"",
 +      @"config": [self safeConfigSnapshot],
++      @"notes": notes,
 +      @"log_lines": @(self.logLines.count),
 +    };
 +  });
@@ -1830,6 +1883,7 @@
 +
 +    self.running = YES;
 +    self.lastMessage = @"Started";
++    self.notes = @"";
 +
 +    __weak __typeof(self) weakSelf = self;
 +    AutoGLMLogBlock log = ^(NSString *line) {
@@ -1850,6 +1904,9 @@
 +      dispatch_async(strongSelf.stateQueue, ^{
 +        strongSelf.running = NO;
 +        strongSelf.lastMessage = finalMessage;
++        if (strongSelf.agent != nil) {
++          strongSelf.notes = strongSelf.agent.workingNote ?: (strongSelf.notes ?: @"");
++        }
 +        strongSelf.agent = nil;
 +      });
 +    };
@@ -1881,7 +1938,7 @@
 +
 +static NSString *AutoGLMAgentPageHTML(void)
 +{
-+  return
++  NSString *html =
 +  @"<!doctype html>\n"
 +  @"<html>\n"
 +  @"<head>\n"
@@ -1945,6 +2002,15 @@
 +  @"        <input id=\"step_delay_seconds\" placeholder=\"0.5\" inputmode=\"decimal\" />\n"
 +  @"      </div>\n"
 +  @"    </div>\n"
++  @"    <label>Max Completion Tokens</label>\n"
++  @"    <input id=\"max_completion_tokens\" placeholder=\"32768\" inputmode=\"numeric\" />\n"
++  @"    <h3>System Prompt</h3>\n"
++  @"    <div class=\"muted\">\n"
++  @"      <div>Custom system prompt only takes effect when the checkbox is enabled.</div>\n"
++  @"      <div>Date placeholders: <code>{{DATE_ZH}}</code>: __DATE_ZH_EXAMPLE__ &nbsp; <code>{{DATE_EN}}</code>: __DATE_EN_EXAMPLE__</div>\n"
++  @"    </div>\n"
++  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"use_custom_system_prompt\" /> <span>Use custom system prompt</span></label>\n"
++  @"    <textarea id=\"system_prompt\" class=\"mono\" placeholder=\"(default system prompt)\" style=\"min-height:260px\"></textarea>\n"
 +  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"insecure_skip_tls_verify\" /> <span>Insecure: skip TLS verify (debug only)</span></label>\n"
 +  @"    <label class=\"check muted\"><input type=\"checkbox\" id=\"debug_log_raw_assistant\" /> <span>Debug: log raw assistant message (may contain sensitive info)</span></label>\n"
 +  @"    <div class=\"actions\">\n"
@@ -1955,10 +2021,13 @@
 +  @"    </div>\n"
 +  @"    <h3>Status</h3>\n"
 +  @"    <pre id=\"status\">Loading...</pre>\n"
++  @"    <h3>Notes</h3>\n"
++  @"    <pre id=\"notes\"></pre>\n"
 +  @"    <h3>Logs</h3>\n"
 +  @"    <pre id=\"logs\">(empty)</pre>\n"
 +  @"  </div>\n"
 +  @"  <script>\n"
++  @"    const DEFAULT_SYSTEM_PROMPT = __DEFAULT_SYSTEM_PROMPT_JSON__;\n"
 +  @"    let dirty = false;\n"
 +  @"    let composing = false;\n"
 +  @"    function isEditing(){\n"
@@ -1969,7 +2038,7 @@
 +  @"    }\n"
 +  @"    function markDirty(){ dirty = true; }\n"
 +  @"    function initDirtyTracking(){\n"
-+  @"      const ids = ['base_url','model','api_key','task','max_steps','timeout_seconds','step_delay_seconds'];\n"
++  @"      const ids = ['base_url','model','api_key','task','max_steps','max_completion_tokens','timeout_seconds','step_delay_seconds','system_prompt'];\n"
 +  @"      for (const id of ids){\n"
 +  @"        const el = document.getElementById(id);\n"
 +  @"        if (!el) continue;\n"
@@ -1978,7 +2047,7 @@
 +  @"        el.addEventListener('compositionstart', () => { composing = true; });\n"
 +  @"        el.addEventListener('compositionend', () => { composing = false; markDirty(); });\n"
 +  @"      }\n"
-+  @"      const cbs = ['remember_api_key','insecure_skip_tls_verify','debug_log_raw_assistant'];\n"
++  @"      const cbs = ['remember_api_key','insecure_skip_tls_verify','debug_log_raw_assistant','use_custom_system_prompt'];\n"
 +  @"      for (const id of cbs){\n"
 +  @"        const el = document.getElementById(id);\n"
 +  @"        if (!el) continue;\n"
@@ -2014,10 +2083,13 @@
 +  @"      const cfg = {\n"
 +  @"        base_url: document.getElementById('base_url').value,\n"
 +  @"        model: document.getElementById('model').value,\n"
++  @"        use_custom_system_prompt: document.getElementById('use_custom_system_prompt').checked,\n"
++  @"        system_prompt: document.getElementById('system_prompt').value,\n"
 +  @"        remember_api_key: document.getElementById('remember_api_key').checked,\n"
 +  @"        debug_log_raw_assistant: document.getElementById('debug_log_raw_assistant').checked,\n"
 +  @"        task: document.getElementById('task').value,\n"
 +  @"        max_steps: document.getElementById('max_steps').value,\n"
++  @"        max_completion_tokens: document.getElementById('max_completion_tokens').value,\n"
 +  @"        timeout_seconds: document.getElementById('timeout_seconds').value,\n"
 +  @"        step_delay_seconds: document.getElementById('step_delay_seconds').value,\n"
 +  @"        insecure_skip_tls_verify: document.getElementById('insecure_skip_tls_verify').checked,\n"
@@ -2031,8 +2103,12 @@
 +  @"      document.getElementById('model').value = cfg.model || '';\n"
 +  @"      document.getElementById('task').value = cfg.task || '';\n"
 +  @"      document.getElementById('max_steps').value = cfg.max_steps || 30;\n"
++  @"      document.getElementById('max_completion_tokens').value = cfg.max_completion_tokens || 32768;\n"
 +  @"      document.getElementById('timeout_seconds').value = cfg.timeout_seconds || 90;\n"
 +  @"      document.getElementById('step_delay_seconds').value = cfg.step_delay_seconds || 0.5;\n"
++  @"      document.getElementById('use_custom_system_prompt').checked = !!cfg.use_custom_system_prompt;\n"
++  @"      const sp = (cfg.system_prompt || '').toString();\n"
++  @"      document.getElementById('system_prompt').value = sp.length ? sp : DEFAULT_SYSTEM_PROMPT;\n"
 +  @"      document.getElementById('remember_api_key').checked = !!cfg.remember_api_key;\n"
 +  @"      document.getElementById('insecure_skip_tls_verify').checked = !!cfg.insecure_skip_tls_verify;\n"
 +  @"      document.getElementById('debug_log_raw_assistant').checked = (cfg.debug_log_raw_assistant !== false);\n"
@@ -2043,6 +2119,8 @@
 +  @"    async function refresh(){\n"
 +  @"      const st = await api('/autoglm/status');\n"
 +  @"      document.getElementById('status').textContent = JSON.stringify(st, null, 2);\n"
++  @"      const notes = st.notes || '';\n"
++  @"      document.getElementById('notes').textContent = notes;\n"
 +  @"      if (!dirty && !isEditing()) {\n"
 +  @"        fillUI((st.config)||{});\n"
 +  @"      }\n"
@@ -2066,11 +2144,22 @@
 +  @"      await refresh();\n"
 +  @"    }\n"
 +  @"    initDirtyTracking();\n"
++  @"    if (document.getElementById('system_prompt') && !document.getElementById('system_prompt').value) {\n"
++  @"      document.getElementById('system_prompt').value = DEFAULT_SYSTEM_PROMPT;\n"
++  @"    }\n"
 +  @"    refresh();\n"
 +  @"    setInterval(refresh, 1500);\n"
 +  @"  </script>\n"
 +  @"</body>\n"
 +  @"</html>\n";
++
++  NSString *dateZh = AutoGLMFormattedDateZH();
++  NSString *dateEn = AutoGLMFormattedDateEN();
++  NSString *defaultSystemPrompt = AutoGLMDefaultSystemPromptTemplate();
++  html = [html stringByReplacingOccurrencesOfString:@"__DATE_ZH_EXAMPLE__" withString:AutoGLMHTMLEscape(dateZh)];
++  html = [html stringByReplacingOccurrencesOfString:@"__DATE_EN_EXAMPLE__" withString:AutoGLMHTMLEscape(dateEn)];
++  html = [html stringByReplacingOccurrencesOfString:@"__DEFAULT_SYSTEM_PROMPT_JSON__" withString:AutoGLMJSONStringLiteral(defaultSystemPrompt)];
++  return html;
 +}
 +
 +@interface FBAutoGLMCommands : NSObject <FBCommandHandler>
